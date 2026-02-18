@@ -1,0 +1,178 @@
+import gymnasium as gym
+import numpy as np
+import torch
+import batch_grid_env
+from gymnasium import spaces
+import pygame
+
+class BatchedGridEnv(gym.vector.VectorEnv):
+    def __init__(self, num_envs, n_agents=4, map_size=32, device='cpu', render_mode=None):
+        self.num_envs = num_envs
+        self.n_agents = n_agents
+        self.map_size = map_size
+        self.device = device
+        self.render_mode = render_mode
+        self.screen = None
+        self.clock = None
+        self.cell_size = 20  # Pixels per grid cell
+        
+        # 1. Initialize C++ Backend
+        self.env = batch_grid_env.BatchedEnvironment(num_envs)
+        
+        # 2. Define Spaces
+        self.single_action_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(n_agents, 2), dtype=np.float32
+        )
+        self.action_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(num_envs, n_agents, 2), dtype=np.float32
+        )
+        
+        stride = self.env.get_stride()
+        self.single_observation_space = spaces.Box(
+            low=0.0, high=1.0, shape=(stride,), dtype=np.float32
+        )
+        self.observation_space = spaces.Box(
+            low=0.0, high=1.0, shape=(num_envs, stride), dtype=np.float32
+        )
+
+        super().__init__()
+
+        # 3. Zero-Copy Memory Mapping
+        ptr, size_bytes = self.env.get_memory_view()
+        float_count = size_bytes // 4
+        self._raw_tensor = torch.from_blob(ptr, (float_count,), dtype=torch.float32)
+        self.state_tensor = self._raw_tensor.view(num_envs, stride)
+        
+        # Pre-calculate slice indices for faster rendering
+        fms = self.env.get_flat_map_size()
+        self.sl_actual_danger = slice(fms, 2*fms)
+        self.sl_agent_locs = slice(4*fms, 4*fms + n_agents*2)
+        self.sl_global_disc = slice(stride - fms, stride) # Last section
+
+    def reset(self, seed=None, options=None):
+        self.env.reset()
+        obs = self.state_tensor if self.device == 'cpu' else self.state_tensor.to(self.device)
+        return obs, {}
+
+    def step(self, actions):
+        if isinstance(actions, torch.Tensor):
+            actions = actions.detach().cpu().numpy()
+        
+        flat_actions = actions.reshape(self.num_envs, -1).astype(np.float32)
+        rewards = self.env.step(flat_actions)
+        
+        obs = self.state_tensor
+        rewards = torch.from_numpy(rewards)
+        terminated = torch.zeros(self.num_envs, dtype=torch.bool)
+        truncated = torch.zeros(self.num_envs, dtype=torch.bool)
+        
+        if self.render_mode == "human":
+            self.render()
+
+        return obs, rewards, terminated, truncated, {}
+
+    def render(self):
+        if self.screen is None:
+            pygame.init()
+            width = self.map_size * self.cell_size
+            height = self.map_size * self.cell_size
+            self.screen = pygame.display.set_mode((width, height))
+            pygame.display.set_caption("Batched Env (Idx 0)")
+            self.clock = pygame.time.Clock()
+
+        # Fetch Data for Env 0
+        state = self.state_tensor[0].numpy()
+        
+        # Extract Layers
+        danger_map = state[self.sl_actual_danger].reshape(self.map_size, self.map_size)
+        discovered_map = state[self.sl_global_disc].reshape(self.map_size, self.map_size)
+        agents = state[self.sl_agent_locs].reshape(self.n_agents, 2) # [y, x]
+
+        self.screen.fill((0, 0, 0))
+
+        # 1. Draw Grid (Danger Map)
+        for y in range(self.map_size):
+            for x in range(self.map_size):
+                rect = pygame.Rect(
+                    x * self.cell_size, 
+                    y * self.cell_size, 
+                    self.cell_size, 
+                    self.cell_size
+                )
+                
+                # Check if discovered
+                if discovered_map[y, x] > 0.5:
+                    # Visible: Color based on danger (0.0 to 1.0)
+                    # Green (Safe) -> Red (Danger)
+                    d = danger_map[y, x]
+                    color = (
+                        int(255 * d),       # R
+                        int(255 * (1 - d)), # G
+                        0                   # B
+                    )
+                    pygame.draw.rect(self.screen, color, rect)
+                    pygame.draw.rect(self.screen, (50, 50, 50), rect, 1) # Border
+                else:
+                    # Undiscovered: Black (Fog of War)
+                    pygame.draw.rect(self.screen, (0, 0, 0), rect)
+                    # Optional: faint grid line to show it exists
+                    pygame.draw.rect(self.screen, (20, 20, 20), rect, 1)
+
+        # 2. Draw Agents & View Range
+        # Create a transparent surface for view range
+        view_surface = pygame.Surface((self.map_size*self.cell_size, self.map_size*self.cell_size), pygame.SRCALPHA)
+        
+        for i in range(self.n_agents):
+            ay, ax = agents[i]
+            
+            # Convert grid coords to pixel coords
+            # Add 0.5 to center in the tile
+            px = (ax + 0.5) * self.cell_size
+            py = (ay + 0.5) * self.cell_size
+            
+            # Draw View Range (Translucent White Box)
+            # Range is 3, so box width is (3+1+3) = 7 tiles? 
+            # Logic in C++: [y-3, y+3], so 7x7 area
+            vr = 3 
+            rect_size = (vr * 2 + 1) * self.cell_size
+            view_rect = pygame.Rect(0, 0, rect_size, rect_size)
+            view_rect.center = (px, py)
+            
+            # Draw translucent white (255, 255, 255, 30)
+            pygame.draw.rect(view_surface, (255, 255, 255, 30), view_rect)
+
+            # Draw Agent (Blue Circle)
+            pygame.draw.circle(self.screen, (0, 100, 255), (int(px), int(py)), int(self.cell_size * 0.4))
+            # Agent Border (White)
+            pygame.draw.circle(self.screen, (255, 255, 255), (int(px), int(py)), int(self.cell_size * 0.4), 2)
+
+        # Blit the transparent surface onto main screen
+        self.screen.blit(view_surface, (0,0))
+
+        pygame.display.flip()
+        
+        # Cap framerate for visualization
+        self.clock.tick(30)
+        
+        # Handle Window Close Event
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.close()
+
+    def close(self):
+        if self.screen is not None:
+            pygame.quit()
+            self.screen = None
+
+# --- Quick Test ---
+if __name__ == "__main__":
+    env = BatchedGridEnv(num_envs=16, render_mode="human")
+    obs, _ = env.reset()
+    
+    # Simple random walk
+    try:
+        while True:
+            actions = np.random.uniform(-1, 1, (16, 4, 2))
+            env.step(actions)
+    except KeyboardInterrupt:
+        env.close()
