@@ -4,6 +4,7 @@ import torch
 import batch_grid_env
 from gymnasium import spaces
 import pygame
+import ctypes
 
 class BatchedGridEnv(gym.vector.VectorEnv):
     def __init__(self, num_envs, n_agents=4, map_size=32, device='cpu', render_mode=None):
@@ -40,13 +41,20 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         # 3. Zero-Copy Memory Mapping
         ptr, size_bytes = self.env.get_memory_view()
         float_count = size_bytes // 4
-        self._raw_tensor = torch.from_blob(ptr, (float_count,), dtype=torch.float32)
+        # Create a ctypes array view of the C++ vector memory
+        ctypes_array = (ctypes.c_float * float_count).from_address(ptr)
+        # Convert to numpy array (shares memory with ctypes wrapper)
+        np_array = np.ctypeslib.as_array(ctypes_array)
+        # Create torch tensor from numpy view
+        self._raw_tensor = torch.from_numpy(np_array)
         self.state_tensor = self._raw_tensor.view(num_envs, stride)
         
         # Pre-calculate slice indices for faster rendering
         fms = self.env.get_flat_map_size()
         self.sl_actual_danger = slice(fms, 2*fms)
-        self.sl_agent_locs = slice(4*fms, 4*fms + n_agents*2)
+        # agent_locations offset: (2 + 2*N_AGENTS)*FLAT_MAP_SIZE
+        agent_locs_offset = (2 + 2*n_agents) * fms
+        self.sl_agent_locs = slice(agent_locs_offset, agent_locs_offset + n_agents*2)
         self.sl_global_disc = slice(stride - fms, stride) # Last section
 
     def reset(self, seed=None, options=None):
@@ -158,6 +166,7 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.close()
+                raise SystemExit("Pygame window closed by user")
 
     def close(self):
         if self.screen is not None:
@@ -166,6 +175,36 @@ class BatchedGridEnv(gym.vector.VectorEnv):
 
 # --- Quick Test ---
 if __name__ == "__main__":
+    import time
+    
+    # FPS test: 1 env, 10k frames
+    print("=== FPS Test: 1 env, 10k frames ===")
+    env1 = BatchedGridEnv(num_envs=1, render_mode=None)
+    obs, _ = env1.reset()
+    start = time.time()
+    for _ in range(10000):
+        actions = np.random.uniform(-1, 1, (1, 4, 2))
+        env1.step(actions)
+    elapsed1 = time.time() - start
+    fps1 = 10000 / elapsed1
+    print(f"Time: {elapsed1:.2f}s, FPS: {fps1:.1f}")
+    env1.close()
+    
+    # FPS test: 16 envs, 10k frames
+    print("\n=== FPS Test: 16 envs, 10k frames ===")
+    env16 = BatchedGridEnv(num_envs=16, render_mode=None)
+    obs, _ = env16.reset()
+    start = time.time()
+    for _ in range(10000):
+        actions = np.random.uniform(-1, 1, (16, 4, 2))
+        env16.step(actions)
+    elapsed16 = time.time() - start
+    fps16 = 10000 / elapsed16 * 16
+    print(f"Time: {elapsed16:.2f}s, FPS: {fps16:.1f}")
+    env16.close()
+    
+    # Render test
+    print("\n=== Render Test: 16 envs ===")
     env = BatchedGridEnv(num_envs=16, render_mode="human")
     obs, _ = env.reset()
     
