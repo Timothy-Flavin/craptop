@@ -33,10 +33,10 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         
         stride = self.env.get_stride()
         self.single_observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(stride,), dtype=np.float32
+            low=-1.0, high=1.0, shape=(stride,), dtype=np.float32
         )
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(num_envs, stride), dtype=np.float32
+            low=-1.0, high=1.0, shape=(num_envs, stride), dtype=np.float32
         )
 
         super().__init__()
@@ -82,7 +82,7 @@ class BatchedGridEnv(gym.vector.VectorEnv):
 
         return obs, rewards, terminated, truncated, {}
 
-    def get_gravity_attractions(self, feature_type, agent_mask=None, pow=2):
+    def get_gravity_attractions(self, feature_type, agent_mask=None, pow=2, normalize=False):
         """
         Compute gravity attraction vectors for agents towards a feature.
         
@@ -90,6 +90,7 @@ class BatchedGridEnv(gym.vector.VectorEnv):
             feature_type: FeatureType enum value (EXPECTED_DANGER, OBSERVED_DANGER, etc.)
             agent_mask: Optional boolean array of shape (n_agents,) or None for all agents
             pow: Power parameter for gravity calculation (default 2)
+            normalize: If True, normalize gravity vectors to max norm 1.0 (default False)
         
         Returns:
             torch.Tensor of shape (num_envs, n_agents, 2) with (gx, gy) for each agent
@@ -97,7 +98,7 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         if agent_mask is not None:
             agent_mask = np.asarray(agent_mask, dtype=bool)
         
-        gravity_array = self.env.get_gravity_attractions(agent_mask, feature_type, pow)
+        gravity_array = self.env.get_gravity_attractions(agent_mask, feature_type, pow, normalize)
         return torch.from_numpy(gravity_array)
 
     def render(self):
@@ -131,13 +132,15 @@ class BatchedGridEnv(gym.vector.VectorEnv):
                 
                 # Check if discovered
                 if discovered_map[y, x] > 0.5:
-                    # Visible: Color based on danger (0.0 to 1.0)
-                    # Green (Safe) -> Red (Danger)
+                    # Visible: Color based on danger (-1.0 to 1.0)
+                    # -1.0 (safe) -> Green, 0.0 (neutral) -> Yellow, 1.0 (danger) -> Red
                     d = danger_map[y, x]
+                    # Map [-1, 1] to [0, 1] for visualization
+                    d_normalized = (d + 1.0) / 2.0
                     color = (
-                        int(255 * d),       # R
-                        int(255 * (1 - d)), # G
-                        0                   # B
+                        int(255 * d_normalized),           # R: 0 at -1, 255 at +1
+                        int(255 * (1 - abs(d))),          # G: 255 at 0, 0 at extremes
+                        int(255 * (1 - d_normalized))     # B: 255 at -1, 0 at +1
                     )
                     pygame.draw.rect(self.screen, color, rect)
                     pygame.draw.rect(self.screen, (50, 50, 50), rect, 1) # Border
@@ -245,8 +248,13 @@ if __name__ == "__main__":
     # Simple random walk
     try:
         while True:
+            obs_masked = env.get_gravity_attractions(FeatureType.GLOBAL_UNDISCOVERED, agent_mask=None, normalize=True, pow=1)
+            danger_masked = env.get_gravity_attractions(FeatureType.OBSERVED_DANGER, agent_mask=None, normalize=True, pow=2)
+            other_masked = env.get_gravity_attractions(FeatureType.OTHER_AGENTS, agent_mask=None, normalize=True, pow=1)
+            
+            print(f"Obs gravity sample: {obs_masked[0, 0].numpy()}, Danger gravity sample: {danger_masked[0, 0].numpy()}, Other agents gravity sample: {other_masked[0, 0].numpy()}")
             actions = np.random.uniform(-1, 1, (16, 4, 2))
-            obs, r, term, trunc, info = env.step(actions)
+            obs, r, term, trunc, info = env.step(-danger_masked + obs_masked-other_masked+actions)#obs_masked.numpy() + actions - danger_masked.numpy() - other_masked.numpy())  # Add gravity to random actions
             if sum(r[0])>0:
                 print(f"Rewards: {r[0]}")
     except KeyboardInterrupt:

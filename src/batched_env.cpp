@@ -23,7 +23,12 @@ enum FeatureType {
     OBSERVED_DANGER_FEATURE = 2,
     OBS_FEATURE = 3,
     EXPECTED_OBS_FEATURE = 4,
-    GLOBAL_DISCOVERED_FEATURE = 5
+    GLOBAL_DISCOVERED_FEATURE = 5,
+    OTHER_AGENTS_FEATURE = 6,
+    OTHER_AGENTS_LAST_KNOWN_FEATURE = 7,
+    GLOBAL_UNDISCOVERED_FEATURE = 8,
+    OBS_UNDISCOVERED_FEATURE = 9,
+    EXPECTED_OBS_UNDISCOVERED_FEATURE = 10
 };
 
 constexpr int FLAT_MAP_SIZE = (MAP_SIZE * MAP_SIZE);
@@ -51,15 +56,51 @@ struct GameStateView {
     float* global_discovered; 
 };
 
+// Helper function to compute gravity from other agent positions
+// Treats each agent as a point mass with mass=1.0
+void get_gravity_from_agents(float* all_agent_locations, int current_agent_idx, int pow, 
+                             float agent_x, float agent_y, float& out_gx, float& out_gy) {
+    out_gx = 0.0f;
+    out_gy = 0.0f;
+
+    for (int j = 0; j < N_AGENTS; ++j) {
+        if (j == current_agent_idx) continue; // Skip self
+        
+        float other_x = all_agent_locations[j * 2 + 1];
+        float other_y = all_agent_locations[j * 2];
+        
+        // Vector from current agent TO other agent
+        float dx = other_x - agent_x;
+        float dy = other_y - agent_y;
+        
+        float dist_sq = dx * dx + dy * dy;
+        float dist = std::sqrt(dist_sq);
+        
+        if (dist < 0.1f) continue; // Min distance clamp
+        
+        // Force magnitude = 1.0 / dist^pow (treating other agent as mass=1.0)
+        float denom;
+        if (pow == 2) denom = dist * dist_sq;       // dist^3
+        else if (pow == 1) denom = dist_sq;         // dist^2
+        else denom = std::pow(dist, pow + 1);
+        
+        float force = 1.0f / denom;
+        
+        out_gx += dx * force;
+        out_gy += dy * force;
+    }
+}
+
 // Returns vector: Sum(Mass / dist^pow * direction_vector)
 // returns dx, dy
-void get_gravity(float* map, int pow, float agent_x, float agent_y, float& out_gx, float& out_gy) {
+// If invert=true, uses (1.0 - map[i]) as mass (for undiscovered features)
+void get_gravity(float* map, int pow, float agent_x, float agent_y, float& out_gx, float& out_gy, bool invert = false) {
     out_gx = 0.0f;
     out_gy = 0.0f;
 
     for (int y = 0; y < MAP_SIZE; ++y) {
         for (int x = 0; x < MAP_SIZE; ++x) {
-            float mass = map[y * MAP_SIZE + x];
+            float mass = invert ? (1.0f - map[y * MAP_SIZE + x]) : map[y * MAP_SIZE + x];
             if (mass <= 0.001f) continue; // Optimization: Ignore empty cells
 
             // Vector from Agent TO Cell
@@ -125,14 +166,22 @@ public:
                 int y = i / MAP_SIZE;
                 int x = i % MAP_SIZE;
                 // Deterministic pseudo-random based on env index
-                float val = (std::sin(x * 0.3f + e) + std::cos(y * 0.3f + e*2) + 2.0f) / 4.0f;
-                s.actual_danger[i] = std::fmin(1.0f, std::fmax(0.0f, val));
-                s.expected_danger[i] = 0.5f; 
+                // Changed to [-1, 1] range
+                float val = (std::sin(x * 0.3f + e) + std::cos(y * 0.3f + e*2)) / 2.0f;
+                s.actual_danger[i] = std::fmin(1.0f, std::fmax(-1.0f, val));
+                s.expected_danger[i] = 0.0f; // Midpoint of [-1, 1] 
             }
 
             for (int i = 0; i < N_AGENTS; ++i) {
                 s.agent_locations[i * 2] = MAP_SIZE / 2.0f;
                 s.agent_locations[i * 2 + 1] = MAP_SIZE / 2.0f;
+            }
+            
+            // Initialize observed_danger with expected_danger for all agents
+            for (int i = 0; i < N_AGENTS; ++i) {
+                for (int j = 0; j < FLAT_MAP_SIZE; ++j) {
+                    s.observed_danger[i * FLAT_MAP_SIZE + j] = s.expected_danger[j];
+                }
             }
             
             update_obs(s);
@@ -152,6 +201,7 @@ public:
 
             update_locations(s, r, e);
             update_obs(s);
+            update_last_location(s);
             calc_rewards(s, rewards_ptr, e);
         }
 
@@ -169,7 +219,8 @@ public:
     py::array_t<float> get_gravity_attractions(
         py::object agent_mask_obj, 
         int feature_type,
-        int pow = 2) 
+        int pow = 2,
+        bool normalize = false) 
     {
         // Parse agent mask (None means all agents)
         std::vector<bool> agent_mask(N_AGENTS, true);
@@ -202,6 +253,7 @@ public:
                 float gx, gy;
 
                 float* feature_map = nullptr;
+                bool invert = false;
                 
                 if (feature_type == EXPECTED_DANGER_FEATURE) {
                     feature_map = s.expected_danger;
@@ -215,16 +267,44 @@ public:
                     feature_map = s.expected_obs + (i * FLAT_MAP_SIZE);
                 } else if (feature_type == GLOBAL_DISCOVERED_FEATURE) {
                     feature_map = s.global_discovered;
+                } else if (feature_type == GLOBAL_UNDISCOVERED_FEATURE) {
+                    feature_map = s.global_discovered;
+                    invert = true; // Use (1.0 - discovered)
+                } else if (feature_type == OBS_UNDISCOVERED_FEATURE) {
+                    feature_map = s.obs + (i * FLAT_MAP_SIZE);
+                    invert = true; // Use (1.0 - obs)
+                } else if (feature_type == EXPECTED_OBS_UNDISCOVERED_FEATURE) {
+                    feature_map = s.expected_obs + (i * FLAT_MAP_SIZE);
+                    invert = true; // Use (1.0 - expected_obs)
+                } else if (feature_type == OTHER_AGENTS_FEATURE) {
+                    // Use actual current locations of other agents
+                    get_gravity_from_agents(s.agent_locations, i, pow, agent_x, agent_y, gx, gy);
+                    feature_map = nullptr; // Signal that we already computed gravity
+                } else if (feature_type == OTHER_AGENTS_LAST_KNOWN_FEATURE) {
+                    // Use this agent's last known locations of other agents
+                    float* agent_i_last_known = s.last_agent_locations + (i * 2 * N_AGENTS);
+                    get_gravity_from_agents(agent_i_last_known, i, pow, agent_x, agent_y, gx, gy);
+                    feature_map = nullptr; // Signal that we already computed gravity
                 }
 
                 if (feature_map) {
-                    get_gravity(feature_map, pow, agent_x, agent_y, gx, gy);
-                } else {
+                    get_gravity(feature_map, pow, agent_x, agent_y, gx, gy, invert);
+                } else if (feature_type != OTHER_AGENTS_FEATURE && 
+                           feature_type != OTHER_AGENTS_LAST_KNOWN_FEATURE) {
                     gx = gy = 0.0f;
                 }
 
-                output_ptr(e, i, 0) = gx;
-                output_ptr(e, i, 1) = gy;
+                // Normalize to max norm 1.0 if requested
+                if (normalize) {
+                    float mag = std::sqrt(gx * gx + gy * gy);
+                    if (mag > 1.0f) {
+                        gx /= mag;
+                        gy /= mag;
+                    }
+                }
+
+                output_ptr(e, i, 0) = gy; // dy
+                output_ptr(e, i, 1) = gx; // dx
             }
         }
 
@@ -277,6 +357,30 @@ private:
         }
     }
 
+    void update_last_location(GameStateView& s) {
+        // For each agent i (viewer/row agent), check if other agents j (target/col agent)
+        // are within view range, and update their last known location if so
+        for (int i = 0; i < N_AGENTS; ++i) {
+            int viewer_y = (int)s.agent_locations[i * 2];
+            int viewer_x = (int)s.agent_locations[i * 2 + 1];
+            
+            for (int j = 0; j < N_AGENTS; ++j) {
+                int target_y = (int)s.agent_locations[j * 2];
+                int target_x = (int)s.agent_locations[j * 2 + 1];
+                
+                // Check if target agent j is within view range of viewer agent i
+                if (std::abs(viewer_y - target_y) <= VIEW_RANGE && 
+                    std::abs(viewer_x - target_x) <= VIEW_RANGE) {
+                    // Update agent i's knowledge of agent j's location
+                    // Storage: last_agent_locations[i * (2 * N_AGENTS) + j * 2] = y
+                    //          last_agent_locations[i * (2 * N_AGENTS) + j * 2 + 1] = x
+                    s.last_agent_locations[i * (2 * N_AGENTS) + j * 2] = s.agent_locations[j * 2];
+                    s.last_agent_locations[i * (2 * N_AGENTS) + j * 2 + 1] = s.agent_locations[j * 2 + 1];
+                }
+            }
+        }
+    }
+
     void calc_rewards(GameStateView& s, py::detail::unchecked_mutable_reference<float, 2>& rewards, int env_idx) {
         for(int i=0; i<N_AGENTS; ++i) rewards(env_idx, i) = 0.0f;
 
@@ -317,7 +421,12 @@ PYBIND11_MODULE(multi_agent_coverage, m) {
         .value("OBSERVED_DANGER", OBSERVED_DANGER_FEATURE)
         .value("OBS", OBS_FEATURE)
         .value("EXPECTED_OBS", EXPECTED_OBS_FEATURE)
-        .value("GLOBAL_DISCOVERED", GLOBAL_DISCOVERED_FEATURE);
+        .value("GLOBAL_DISCOVERED", GLOBAL_DISCOVERED_FEATURE)
+        .value("OTHER_AGENTS", OTHER_AGENTS_FEATURE)
+        .value("OTHER_AGENTS_LAST_KNOWN", OTHER_AGENTS_LAST_KNOWN_FEATURE)
+        .value("GLOBAL_UNDISCOVERED", GLOBAL_UNDISCOVERED_FEATURE)
+        .value("OBS_UNDISCOVERED", OBS_UNDISCOVERED_FEATURE)
+        .value("EXPECTED_OBS_UNDISCOVERED", EXPECTED_OBS_UNDISCOVERED_FEATURE);
 
     py::class_<BatchedEnvironment>(m, "BatchedEnvironment")
         .def(py::init<int>())
@@ -329,6 +438,7 @@ PYBIND11_MODULE(multi_agent_coverage, m) {
         .def("get_gravity_attractions", &BatchedEnvironment::get_gravity_attractions,
              py::arg("agent_mask") = py::none(),
              py::arg("feature_type"),
-             py::arg("pow") = 2)
+             py::arg("pow") = 2,
+             py::arg("normalize") = false)
         .def_readonly("num_envs", &BatchedEnvironment::num_envs);
 }
