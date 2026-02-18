@@ -14,7 +14,7 @@ else:
 
 ext_modules = [
     Pybind11Extension(
-        "batch_grid_env",
+        "multi_agent_coverage",
         ["src/batched_env.cpp"],
         extra_compile_args=c_args,
         extra_link_args=l_args,
@@ -22,7 +22,7 @@ ext_modules = [
 ]
 
 setuptools.setup(
-    name="batch_grid_env",
+    name="multi_agent_coverage",
     version="0.1",
     author="Your Name",
     description="High-performance batched multi-agent environment",

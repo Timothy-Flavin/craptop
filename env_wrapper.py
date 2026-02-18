@@ -1,10 +1,13 @@
 import gymnasium as gym
 import numpy as np
 import torch
-import batch_grid_env
+import multi_agent_coverage
 from gymnasium import spaces
 import pygame
 import ctypes
+
+# Re-export FeatureType enum for convenience
+FeatureType = multi_agent_coverage.FeatureType
 
 class BatchedGridEnv(gym.vector.VectorEnv):
     def __init__(self, num_envs, n_agents=4, map_size=32, device='cpu', render_mode=None):
@@ -18,7 +21,7 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         self.cell_size = 20  # Pixels per grid cell
         
         # 1. Initialize C++ Backend
-        self.env = batch_grid_env.BatchedEnvironment(num_envs)
+        self.env = multi_agent_coverage.BatchedEnvironment(num_envs)
         
         # 2. Define Spaces
         self.single_action_space = spaces.Box(
@@ -78,6 +81,24 @@ class BatchedGridEnv(gym.vector.VectorEnv):
             self.render()
 
         return obs, rewards, terminated, truncated, {}
+
+    def get_gravity_attractions(self, feature_type, agent_mask=None, pow=2):
+        """
+        Compute gravity attraction vectors for agents towards a feature.
+        
+        Args:
+            feature_type: FeatureType enum value (EXPECTED_DANGER, OBSERVED_DANGER, etc.)
+            agent_mask: Optional boolean array of shape (n_agents,) or None for all agents
+            pow: Power parameter for gravity calculation (default 2)
+        
+        Returns:
+            torch.Tensor of shape (num_envs, n_agents, 2) with (gx, gy) for each agent
+        """
+        if agent_mask is not None:
+            agent_mask = np.asarray(agent_mask, dtype=bool)
+        
+        gravity_array = self.env.get_gravity_attractions(agent_mask, feature_type, pow)
+        return torch.from_numpy(gravity_array)
 
     def render(self):
         if self.screen is None:
@@ -201,6 +222,19 @@ if __name__ == "__main__":
     elapsed16 = time.time() - start
     fps16 = 10000 / elapsed16 * 16
     print(f"Time: {elapsed16:.2f}s, FPS: {fps16:.1f}")
+    
+    # Gravity attractions test
+    print("\n=== Gravity Attractions Test ===")
+    gravity_observed = env16.get_gravity_attractions(FeatureType.OBSERVED_DANGER, pow=2)
+    print(f"Gravity shape (should be [16, 4, 2]): {gravity_observed.shape}")
+    print(f"Sample gravity for env 0, agent 0: {gravity_observed[0, 0].numpy()}")
+    
+    # Test with agent mask (only first 2 agents)
+    mask = np.array([True, True, False, False])
+    gravity_masked = env16.get_gravity_attractions(FeatureType.GLOBAL_DISCOVERED, agent_mask=mask)
+    print(f"Masked gravity shape: {gravity_masked.shape}")
+    print(f"Masked gravity for disabled agents (should be ~0): {gravity_masked[0, 2:4].numpy()}")
+    
     env16.close()
     
     # Render test
@@ -212,6 +246,8 @@ if __name__ == "__main__":
     try:
         while True:
             actions = np.random.uniform(-1, 1, (16, 4, 2))
-            env.step(actions)
+            obs, r, term, trunc, info = env.step(actions)
+            if sum(r[0])>0:
+                print(f"Rewards: {r[0]}")
     except KeyboardInterrupt:
         env.close()

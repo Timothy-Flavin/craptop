@@ -1,5 +1,8 @@
 .venv
 build
-batch_grid_env.egg-info
+multi_agent_coverage.egg-info
 dist
 __pycache__
+*.so
+*.o
+*.pyc

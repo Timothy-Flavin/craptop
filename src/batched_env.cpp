@@ -16,6 +16,16 @@ namespace py = pybind11;
 #define SPEED 0.5f
 #define DANGER_PENALTY_FACTOR 0.8f
 
+// Feature type enum
+enum FeatureType {
+    EXPECTED_DANGER_FEATURE = 0,
+    ACTUAL_DANGER_FEATURE = 1,
+    OBSERVED_DANGER_FEATURE = 2,
+    OBS_FEATURE = 3,
+    EXPECTED_OBS_FEATURE = 4,
+    GLOBAL_DISCOVERED_FEATURE = 5
+};
+
 constexpr int FLAT_MAP_SIZE = (MAP_SIZE * MAP_SIZE);
 
 // Total floats per environment
@@ -40,6 +50,43 @@ struct GameStateView {
     float* last_agent_locations; 
     float* global_discovered; 
 };
+
+// Returns vector: Sum(Mass / dist^pow * direction_vector)
+// returns dx, dy
+void get_gravity(float* map, int pow, float agent_x, float agent_y, float& out_gx, float& out_gy) {
+    out_gx = 0.0f;
+    out_gy = 0.0f;
+
+    for (int y = 0; y < MAP_SIZE; ++y) {
+        for (int x = 0; x < MAP_SIZE; ++x) {
+            float mass = map[y * MAP_SIZE + x];
+            if (mass <= 0.001f) continue; // Optimization: Ignore empty cells
+
+            // Vector from Agent TO Cell
+            float dx = (float)x - agent_x;
+            float dy = (float)y - agent_y;
+
+            float dist_sq = dx * dx + dy * dy;
+            float dist = std::sqrt(dist_sq);
+
+            if (dist < 0.1f) continue; // Min distance clamp
+
+            // Force magnitude = Mass / dist^pow
+            // Since we need to multiply by normalized direction (dx/dist),
+            // We actually divide by dist^(pow+1)
+            
+            float denom;
+            if (pow == 2) denom = dist * dist_sq;       // dist^3
+            else if (pow == 1) denom = dist_sq;         // dist^2
+            else denom = std::pow(dist, pow + 1);
+            
+            float force = mass / denom;
+
+            out_gx += dx * force;
+            out_gy += dy * force;
+        }
+    }
+}
 
 class BatchedEnvironment {
 public:
@@ -119,6 +166,71 @@ public:
     int get_stride() { return ENV_STRIDE; }
     int get_flat_map_size() { return FLAT_MAP_SIZE; }
 
+    py::array_t<float> get_gravity_attractions(
+        py::object agent_mask_obj, 
+        int feature_type,
+        int pow = 2) 
+    {
+        // Parse agent mask (None means all agents)
+        std::vector<bool> agent_mask(N_AGENTS, true);
+        if (!agent_mask_obj.is_none()) {
+            auto mask = agent_mask_obj.cast<py::array_t<bool>>();
+            auto mask_ptr = mask.data();
+            for (int i = 0; i < N_AGENTS; ++i) {
+                agent_mask[i] = mask_ptr[i];
+            }
+        }
+
+        // Allocate output: (num_envs, N_AGENTS, 2)
+        py::array_t<float> output_array({num_envs, N_AGENTS, 2});
+        auto output_ptr = output_array.mutable_unchecked<3>();
+
+        #pragma omp parallel for
+        for (int e = 0; e < num_envs; ++e) {
+            GameStateView s;
+            bind_state(s, e);
+
+            for (int i = 0; i < N_AGENTS; ++i) {
+                if (!agent_mask[i]) {
+                    output_ptr(e, i, 0) = 0.0f;
+                    output_ptr(e, i, 1) = 0.0f;
+                    continue;
+                }
+
+                float agent_x = s.agent_locations[i * 2 + 1];
+                float agent_y = s.agent_locations[i * 2];
+                float gx, gy;
+
+                float* feature_map = nullptr;
+                
+                if (feature_type == EXPECTED_DANGER_FEATURE) {
+                    feature_map = s.expected_danger;
+                } else if (feature_type == ACTUAL_DANGER_FEATURE) {
+                    feature_map = s.actual_danger;
+                } else if (feature_type == OBSERVED_DANGER_FEATURE) {
+                    feature_map = s.observed_danger + (i * FLAT_MAP_SIZE);
+                } else if (feature_type == OBS_FEATURE) {
+                    feature_map = s.obs + (i * FLAT_MAP_SIZE);
+                } else if (feature_type == EXPECTED_OBS_FEATURE) {
+                    feature_map = s.expected_obs + (i * FLAT_MAP_SIZE);
+                } else if (feature_type == GLOBAL_DISCOVERED_FEATURE) {
+                    feature_map = s.global_discovered;
+                }
+
+                if (feature_map) {
+                    get_gravity(feature_map, pow, agent_x, agent_y, gx, gy);
+                } else {
+                    gx = gy = 0.0f;
+                }
+
+                output_ptr(e, i, 0) = gx;
+                output_ptr(e, i, 1) = gy;
+            }
+        }
+
+        return output_array;
+    }
+
 private:
     void update_locations(GameStateView& s, const py::detail::unchecked_reference<float, 2>& actions, int env_idx) {
         for (int i = 0; i < N_AGENTS; ++i) {
@@ -197,7 +309,16 @@ private:
     }
 };
 
-PYBIND11_MODULE(batch_grid_env, m) {
+PYBIND11_MODULE(multi_agent_coverage, m) {
+    // Feature type enum
+    py::enum_<FeatureType>(m, "FeatureType")
+        .value("EXPECTED_DANGER", EXPECTED_DANGER_FEATURE)
+        .value("ACTUAL_DANGER", ACTUAL_DANGER_FEATURE)
+        .value("OBSERVED_DANGER", OBSERVED_DANGER_FEATURE)
+        .value("OBS", OBS_FEATURE)
+        .value("EXPECTED_OBS", EXPECTED_OBS_FEATURE)
+        .value("GLOBAL_DISCOVERED", GLOBAL_DISCOVERED_FEATURE);
+
     py::class_<BatchedEnvironment>(m, "BatchedEnvironment")
         .def(py::init<int>())
         .def("reset", &BatchedEnvironment::reset)
@@ -205,5 +326,9 @@ PYBIND11_MODULE(batch_grid_env, m) {
         .def("get_memory_view", &BatchedEnvironment::get_memory_view)
         .def("get_stride", &BatchedEnvironment::get_stride)
         .def("get_flat_map_size", &BatchedEnvironment::get_flat_map_size)
+        .def("get_gravity_attractions", &BatchedEnvironment::get_gravity_attractions,
+             py::arg("agent_mask") = py::none(),
+             py::arg("feature_type"),
+             py::arg("pow") = 2)
         .def_readonly("num_envs", &BatchedEnvironment::num_envs);
 }
