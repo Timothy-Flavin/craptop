@@ -498,7 +498,7 @@ private:
     }
 };
 
-PYBIND11_MODULE(multi_agent_coverage, m) {
+PYBIND11_MODULE(_core, m) {
     // Feature type enum
     py::enum_<FeatureType>(m, "FeatureType")
         .value("EXPECTED_DANGER", EXPECTED_DANGER_FEATURE)

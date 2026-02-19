@@ -14,7 +14,7 @@ else:
 
 ext_modules = [
     Pybind11Extension(
-        "multi_agent_coverage",
+        "multi_agent_coverage._core",
         ["src/batched_env.cpp"],
         extra_compile_args=c_args,
         extra_link_args=l_args,
@@ -23,13 +23,13 @@ ext_modules = [
 
 setuptools.setup(
     name="multi_agent_coverage",
-    version="0.1.2",
+    version="0.1.3",
     author="Your Name",
     description="High-performance batched multi-agent environment",
+    packages=["multi_agent_coverage"],
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext},
     zip_safe=False,
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    py_modules=["env_wrapper"],
 )
