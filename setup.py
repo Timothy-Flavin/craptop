@@ -23,7 +23,7 @@ ext_modules = [
 
 setuptools.setup(
     name="multi_agent_coverage",
-    version="0.1.1",
+    version="0.1.2",
     author="Your Name",
     description="High-performance batched multi-agent environment",
     ext_modules=ext_modules,

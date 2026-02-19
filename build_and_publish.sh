@@ -16,10 +16,21 @@ else
   export TWINE_PASSWORD="$PYPI_API_TOKEN"
 fi
 
-rm -rf dist build *.egg-info
-python -m pip install --upgrade build twine
-python -m build --sdist --wheel
-python -m twine check dist/*
-python -m twine upload dist/*
+rm -rf dist build wheelhouse *.egg-info
+python -m pip install --upgrade build twine auditwheel
 
-echo "Published to PyPI (if credentials provided)."
+# Build sdist + raw wheel
+python -m build --sdist --wheel
+
+# Repair the Linux wheel: validates manylinux policy and bundles non-standard
+# shared libs (e.g. libgomp from OpenMP). Output goes to wheelhouse/.
+echo "Repairing wheel with auditwheel..."
+auditwheel repair dist/*.whl --wheel-dir wheelhouse/
+
+# Sanity-check everything we are about to ship
+python -m twine check dist/*.tar.gz wheelhouse/*.whl
+
+# Upload: sdist from dist/, repaired wheel from wheelhouse/
+python -m twine upload dist/*.tar.gz wheelhouse/*.whl
+
+echo "Published to PyPI."
