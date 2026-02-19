@@ -79,13 +79,13 @@ void get_gravity_from_agents(float* all_agent_locations, int current_agent_idx, 
         float dist_sq = dx * dx + dy * dy;
         float dist = std::sqrt(dist_sq);
         
-        if (dist < 0.1f) continue; // Min distance clamp
+        if (dist_sq < 0.001f) continue; // Min distance clamp
         
         // Force magnitude = 1.0 / dist^pow (treating other agent as mass=1.0)
         float denom;
         if (pow == 2) denom = dist * dist_sq;       // dist^3
         else if (pow == 1) denom = dist_sq;         // dist^2
-        else denom = std::pow(dist, pow + 1);
+        else denom = std::pow(dist, pow);
         
         float force = 1.0f / denom;
         
@@ -113,7 +113,7 @@ void get_gravity(float* map, int pow, float agent_x, float agent_y, float& out_g
             float dist_sq = dx * dx + dy * dy;
             float dist = std::sqrt(dist_sq);
 
-            if (dist < 0.1f) continue; // Min distance clamp
+            if (dist_sq < 0.001f) continue; // Min distance clamp
 
             // Force magnitude = Mass / dist^pow
             // Since we need to multiply by normalized direction (dx/dist),
@@ -122,7 +122,7 @@ void get_gravity(float* map, int pow, float agent_x, float agent_y, float& out_g
             float denom;
             if (pow == 2) denom = dist * dist_sq;       // dist^3
             else if (pow == 1) denom = dist_sq;         // dist^2
-            else denom = std::pow(dist, pow + 1);
+            else denom = std::pow(dist, pow);
             
             float force = mass / denom;
 
@@ -140,6 +140,7 @@ public:
     std::vector<float> data; 
     std::vector<std::string> map_paths;
     std::vector<std::string> expected_map_paths;
+    std::vector<bool> env_terminated;
 
     BatchedEnvironment(int n_envs, int sim_seed, 
                        std::vector<std::string> maps = {}, 
@@ -147,6 +148,7 @@ public:
         : num_envs(n_envs), seed(sim_seed), map_paths(maps), expected_map_paths(expected_maps) {
         data.resize(num_envs * ENV_STRIDE);
         rngs.resize(num_envs);
+        env_terminated.assign(num_envs, false);
         for(int i=0; i<num_envs; ++i) {
             rngs[i].seed(seed + i);
         }
@@ -165,59 +167,65 @@ public:
         s.global_discovered = ptr; 
     }
 
+    void reset_env(GameStateView& s, int e) {
+        // Zero out memory for this env
+        std::memset(data.data() + (e * ENV_STRIDE), 0, ENV_STRIDE * sizeof(float));
+
+        // Actual danger: load from file or procedural fallback
+        if (!map_paths.empty()) {
+            std::string path = map_paths[e % map_paths.size()];
+            std::ifstream file(path, std::ios::binary);
+            if (file.is_open()) {
+                file.read(reinterpret_cast<char*>(s.actual_danger), FLAT_MAP_SIZE * sizeof(float));
+                file.close();
+            } else {
+                for (int i = 0; i < FLAT_MAP_SIZE; ++i) {
+                    int y = i / MAP_SIZE, x = i % MAP_SIZE;
+                    float val = (std::sin(x * 0.3f + e) + std::cos(y * 0.3f + e*2)) / 2.0f;
+                    s.actual_danger[i] = std::fmin(1.0f, std::fmax(-1.0f, val));
+                }
+            }
+        } else {
+            for (int i = 0; i < FLAT_MAP_SIZE; ++i) {
+                int y = i / MAP_SIZE, x = i % MAP_SIZE;
+                float val = (std::sin(x * 0.3f + e) + std::cos(y * 0.3f + e*2)) / 2.0f;
+                s.actual_danger[i] = std::fmin(1.0f, std::fmax(-1.0f, val));
+            }
+        }
+
+        // Expected danger: load from file or default to 0
+        if (!expected_map_paths.empty()) {
+            std::string path = expected_map_paths[e % expected_map_paths.size()];
+            std::ifstream file(path, std::ios::binary);
+            if (file.is_open()) {
+                file.read(reinterpret_cast<char*>(s.expected_danger), FLAT_MAP_SIZE * sizeof(float));
+                file.close();
+            } else {
+                for (int i = 0; i < FLAT_MAP_SIZE; ++i) s.expected_danger[i] = 0.0f;
+            }
+        } else {
+            for (int i = 0; i < FLAT_MAP_SIZE; ++i) s.expected_danger[i] = 0.0f;
+        }
+
+        for (int i = 0; i < N_AGENTS; ++i) {
+            s.agent_locations[i * 2]     = MAP_SIZE / 2.0f;
+            s.agent_locations[i * 2 + 1] = MAP_SIZE / 2.0f;
+        }
+
+        for (int i = 0; i < N_AGENTS; ++i)
+            for (int j = 0; j < FLAT_MAP_SIZE; ++j)
+                s.observed_danger[i * FLAT_MAP_SIZE + j] = s.expected_danger[j];
+
+        update_obs(s);
+    }
+
     void reset() {
-        // Parallel reset
+        env_terminated.assign(num_envs, false);
         #pragma omp parallel for
         for (int e = 0; e < num_envs; ++e) {
             GameStateView s;
             bind_state(s, e);
-            
-            // Zero out memory for this env
-            std::memset(data.data() + (e * ENV_STRIDE), 0, ENV_STRIDE * sizeof(float));
-
-            // Procedural Map Gen (Thread-safe RNG is tricky, using simple math here)
-            for (int i = 0; i < FLAT_MAP_SIZE; ++i) {
-                int y = i / MAP_SIZE;
-                int x = i % MAP_SIZE;
-                // Deterministic pseudo-random based on env index
-                // Changed to [-1, 1] range
-                float val = (std::sin(x * 0.3f + e) + std::cos(y * 0.3f + e*2)) / 2.0f;
-                s.actual_danger[i] = std::fmin(1.0f, std::fmax(-1.0f, val));
-                 // Midpoint of [-1, 1], will be overwritten by expected logic below
-            }
-            
-            // Expected danger is 0.0 unless we have a prior map.
-            if (!expected_map_paths.empty()) {
-                std::string path = expected_map_paths[e % expected_map_paths.size()];
-                std::ifstream file(path, std::ios::binary);
-                if (file.is_open()) {
-                    file.read(reinterpret_cast<char*>(s.expected_danger), FLAT_MAP_SIZE * sizeof(float));
-                    file.close();
-                } else {
-                     // Fallback if file load fails
-                    for (int i = 0; i < FLAT_MAP_SIZE; ++i) {
-                        s.expected_danger[i] = 0.0f; 
-                    }
-                }
-            } else {
-                for (int i = 0; i < FLAT_MAP_SIZE; ++i) {
-                    s.expected_danger[i] = 0.0f; 
-                }
-            }
-
-            for (int i = 0; i < N_AGENTS; ++i) {
-                s.agent_locations[i * 2] = MAP_SIZE / 2.0f;
-                s.agent_locations[i * 2 + 1] = MAP_SIZE / 2.0f;
-            }
-            
-            // Initialize observed_danger with expected_danger for all agents
-            for (int i = 0; i < N_AGENTS; ++i) {
-                for (int j = 0; j < FLAT_MAP_SIZE; ++j) {
-                    s.observed_danger[i * FLAT_MAP_SIZE + j] = s.expected_danger[j];
-                }
-            }
-            
-            update_obs(s);
+            reset_env(s, e);
         }
     }
 
@@ -234,11 +242,18 @@ public:
             GameStateView s;
             bind_state(s, e);
 
+            // Auto-reset any environment that terminated on the previous step
+            if (env_terminated[e]) {
+                reset_env(s, e);
+                env_terminated[e] = false;
+            }
+
             update_locations(s, r, e);
             update_obs(s);
             update_last_location(s, e, communication_prob);
             bool done = calc_rewards(s, rewards_ptr, e);
             terminated_ptr(e) = done;
+            env_terminated[e] = done;
         }
 
         return {rewards_array, terminated_array};

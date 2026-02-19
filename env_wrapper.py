@@ -41,9 +41,9 @@ def convert_map(image_path, output_path=None):
     # 2. Resize to 32x32 using Lanczos for high-quality downsampling
     img = img.resize((32, 32), Image.Resampling.LANCZOS)
     
-    # 3. Convert to numpy array and normalize to [0.0, 1.0]
-    # PNG pixels are 0-255; dividing by 255.0 creates the float32 range
-    grid = np.array(img, dtype=np.float32) / 255.0
+    # 3. Convert to numpy array and normalize to [-1.0, 1.0]
+    # PNG pixels are 0-255; dividing by 255.0 then scaling to [-1, 1]
+    grid = np.array(img, dtype=np.float32) / 255.0 * 2.0 - 1.0
     
     # 4. Flatten to a 1D array
     grid_1d = grid.flatten()
