@@ -5,12 +5,96 @@ import multi_agent_coverage
 from gymnasium import spaces
 import pygame
 import ctypes
+import os
+
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 # Re-export FeatureType enum for convenience
 FeatureType = multi_agent_coverage.FeatureType
 
+
+def convert_map(image_path, output_path=None):
+    """
+    Converts an image map (PNG/JPG) to the raw binary float32 format expected by the C++ backend.
+    
+    Args:
+        image_path: Path to source image.
+        output_path: Path to save binary file. If None, defaults to image_path with extension replaced by .bin
+    
+    Returns:
+        The path to the binary file.
+    """
+    if not PIL_AVAILABLE:
+        raise ImportError("Pillow is required for map conversion. Install with `pip install Pillow`.")
+
+    if output_path is None:
+        base, _ = os.path.splitext(image_path)
+        output_path = base + ".bin"
+
+    # 1. Load image and convert to Grayscale ('L')
+    img = Image.open(image_path).convert('L')
+    
+    # 2. Resize to 32x32 using Lanczos for high-quality downsampling
+    img = img.resize((32, 32), Image.Resampling.LANCZOS)
+    
+    # 3. Convert to numpy array and normalize to [0.0, 1.0]
+    # PNG pixels are 0-255; dividing by 255.0 creates the float32 range
+    grid = np.array(img, dtype=np.float32) / 255.0
+    
+    # 4. Flatten to a 1D array
+    grid_1d = grid.flatten()
+    
+    # 5. Save as raw binary file
+    grid_1d.tofile(output_path)
+    print(f"converted map {image_path} to {output_path}")
+    return output_path
+
+def _process_map_list(maps_arg, num_envs, arg_name="maps"):
+    """
+    Helper to process a map argument (string, list, or None) into a list of binary file paths.
+    Handles PNG->BIN conversion if needed.
+    """
+    if maps_arg is None:
+        return []
+
+    processed_maps = []
+    if isinstance(maps_arg, str):
+        map_list = [maps_arg] * num_envs
+    elif isinstance(maps_arg, list):
+        if len(maps_arg) != num_envs:
+            raise ValueError(f"Length of {arg_name} list ({len(maps_arg)}) must match num_envs ({num_envs})")
+        map_list = maps_arg
+    else:
+        raise ValueError(f"{arg_name} must be a string path or a list of string paths")
+
+    for m_path in map_list:
+        if not os.path.exists(m_path):
+            raise FileNotFoundError(f"Map file not found: {m_path}")
+        
+        _, ext = os.path.splitext(m_path)
+        if ext.lower() in ['.png', '.jpg', '.jpeg', '.bmp']:
+            # Auto-convert image to bin
+            if not PIL_AVAILABLE:
+                    raise ImportError("Pillow is required for map conversion. Install with `pip install Pillow`.")
+            bin_path = convert_map(m_path)
+            processed_maps.append(bin_path)
+        else:
+            processed_maps.append(m_path)
+    
+    return processed_maps
+
+
 class BatchedGridEnv(gym.vector.VectorEnv):
-    def __init__(self, num_envs, n_agents=4, map_size=32, device='cpu', render_mode=None, seed=42, communication_prob=-1.0):
+    def __init__(self, num_envs, n_agents=4, map_size=32, device='cpu', render_mode=None, seed=42, communication_prob=-1.0, 
+                 maps=None, expected_maps=None):
+        """
+        maps: Path or list of paths to ground truth danger maps.
+        expected_maps: Path or list of paths to prior belief maps (e.g. satellite data).
+        """
         self.num_envs = num_envs
         self.communication_prob = communication_prob
         self.n_agents = n_agents
@@ -21,10 +105,16 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         self.clock = None
         self.cell_size = 20  # Pixels per grid cell
         
-        # 1. Initialize C++ Backend
-        self.env = multi_agent_coverage.BatchedEnvironment(num_envs, seed)
+        # 1. Process Map Arguments
+        processed_maps = _process_map_list(maps, num_envs, "maps")
+        processed_expected_maps = _process_map_list(expected_maps, num_envs, "expected_maps")
+
+        # 2. Initialize C++ Backend
+        self.env = multi_agent_coverage.BatchedEnvironment(
+            num_envs, seed, processed_maps, processed_expected_maps
+        )
         
-        # 2. Define Spaces
+        # 3. Define Spaces
         self.single_action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(n_agents, 2), dtype=np.float32
         )
@@ -42,7 +132,7 @@ class BatchedGridEnv(gym.vector.VectorEnv):
 
         super().__init__()
 
-        # 3. Zero-Copy Memory Mapping
+        # 4. Zero-Copy Memory Mapping
         ptr, size_bytes = self.env.get_memory_view()
         float_count = size_bytes // 4
         # Create a ctypes array view of the C++ vector memory
@@ -71,11 +161,11 @@ class BatchedGridEnv(gym.vector.VectorEnv):
             actions = actions.detach().cpu().numpy()
         
         flat_actions = actions.reshape(self.num_envs, -1).astype(np.float32)
-        rewards = self.env.step(flat_actions, self.communication_prob)
+        rewards, terminated_np = self.env.step(flat_actions, self.communication_prob)
         
         obs = self.state_tensor
         rewards = torch.from_numpy(rewards)
-        terminated = torch.zeros(self.num_envs, dtype=torch.bool)
+        terminated = torch.from_numpy(terminated_np)
         truncated = torch.zeros(self.num_envs, dtype=torch.bool)
         
         if self.render_mode == "human":
@@ -243,7 +333,7 @@ if __name__ == "__main__":
     
     # Render test
     print("\n=== Render Test: 16 envs ===")
-    env = BatchedGridEnv(num_envs=16, render_mode="human")
+    env = BatchedGridEnv(num_envs=16, render_mode="human", maps="map0.png", expected_maps="expected_map0.png")
     obs, _ = env.reset()
     
     # Simple random walk

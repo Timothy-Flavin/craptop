@@ -23,10 +23,13 @@ ext_modules = [
 
 setuptools.setup(
     name="multi_agent_coverage",
-    version="0.1",
+    version="0.1.1",
     author="Your Name",
     description="High-performance batched multi-agent environment",
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext},
     zip_safe=False,
+    long_description=open("README.md").read(),
+    long_description_content_type="text/markdown",
+    py_modules=["env_wrapper"],
 )

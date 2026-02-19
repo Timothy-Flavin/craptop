@@ -1,5 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
+#include <pybind11/stl.h>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -7,6 +8,8 @@
 #include <iostream>
 #include <random>
 #include <omp.h>
+#include <fstream>
+#include <string>
 
 namespace py = pybind11;
 
@@ -135,8 +138,13 @@ public:
     int seed;
     std::vector<std::mt19937> rngs;
     std::vector<float> data; 
+    std::vector<std::string> map_paths;
+    std::vector<std::string> expected_map_paths;
 
-    BatchedEnvironment(int n_envs, int sim_seed) : num_envs(n_envs), seed(sim_seed) {
+    BatchedEnvironment(int n_envs, int sim_seed, 
+                       std::vector<std::string> maps = {}, 
+                       std::vector<std::string> expected_maps = {}) 
+        : num_envs(n_envs), seed(sim_seed), map_paths(maps), expected_map_paths(expected_maps) {
         data.resize(num_envs * ENV_STRIDE);
         rngs.resize(num_envs);
         for(int i=0; i<num_envs; ++i) {
@@ -175,7 +183,26 @@ public:
                 // Changed to [-1, 1] range
                 float val = (std::sin(x * 0.3f + e) + std::cos(y * 0.3f + e*2)) / 2.0f;
                 s.actual_danger[i] = std::fmin(1.0f, std::fmax(-1.0f, val));
-                s.expected_danger[i] = 0.0f; // Midpoint of [-1, 1] 
+                 // Midpoint of [-1, 1], will be overwritten by expected logic below
+            }
+            
+            // Expected danger is 0.0 unless we have a prior map.
+            if (!expected_map_paths.empty()) {
+                std::string path = expected_map_paths[e % expected_map_paths.size()];
+                std::ifstream file(path, std::ios::binary);
+                if (file.is_open()) {
+                    file.read(reinterpret_cast<char*>(s.expected_danger), FLAT_MAP_SIZE * sizeof(float));
+                    file.close();
+                } else {
+                     // Fallback if file load fails
+                    for (int i = 0; i < FLAT_MAP_SIZE; ++i) {
+                        s.expected_danger[i] = 0.0f; 
+                    }
+                }
+            } else {
+                for (int i = 0; i < FLAT_MAP_SIZE; ++i) {
+                    s.expected_danger[i] = 0.0f; 
+                }
             }
 
             for (int i = 0; i < N_AGENTS; ++i) {
@@ -194,10 +221,12 @@ public:
         }
     }
 
-    py::array_t<float> step(py::array_t<float> actions_array, float communication_prob = -1.0f) {
+    std::pair<py::array_t<float>, py::array_t<bool>> step(py::array_t<float> actions_array, float communication_prob = -1.0f) {
         auto r = actions_array.unchecked<2>(); 
         py::array_t<float> rewards_array({num_envs, N_AGENTS});
         auto rewards_ptr = rewards_array.mutable_unchecked<2>();
+        py::array_t<bool> terminated_array({num_envs});
+        auto terminated_ptr = terminated_array.mutable_unchecked<1>();
 
         // Parallel Step
         #pragma omp parallel for
@@ -208,10 +237,11 @@ public:
             update_locations(s, r, e);
             update_obs(s);
             update_last_location(s, e, communication_prob);
-            calc_rewards(s, rewards_ptr, e);
+            bool done = calc_rewards(s, rewards_ptr, e);
+            terminated_ptr(e) = done;
         }
 
-        return rewards_array;
+        return {rewards_array, terminated_array};
     }
 
     // Return (memory_ptr, size_bytes) for Python ctypes/torch
@@ -410,16 +440,18 @@ private:
         }
     }
 
-    void calc_rewards(GameStateView& s, py::detail::unchecked_mutable_reference<float, 2>& rewards, int env_idx) {
+    // Returns true if all squares are discovered (terminal condition)
+    bool calc_rewards(GameStateView& s, py::detail::unchecked_mutable_reference<float, 2>& rewards, int env_idx) {
         for(int i=0; i<N_AGENTS; ++i) rewards(env_idx, i) = 0.0f;
 
+        int undiscovered_count = 0;
         for (int y = 0; y < MAP_SIZE; ++y) {
             for (int x = 0; x < MAP_SIZE; ++x) {
                 int idx = y * MAP_SIZE + x;
                 if (s.global_discovered[idx] > 0.5f) continue;
 
                 int seeing_count = 0;
-                bool seen_by[N_AGENTS] = {false}; // Fixed size array initialization
+                bool seen_by[N_AGENTS] = {false};
 
                 for (int i = 0; i < N_AGENTS; ++i) {
                     int ay = (int)s.agent_locations[i * 2];
@@ -436,9 +468,18 @@ private:
                     for (int i = 0; i < N_AGENTS; ++i) {
                         if (seen_by[i]) rewards(env_idx, i) += share;
                     }
+                } else {
+                    undiscovered_count++;
                 }
             }
         }
+
+        // All squares discovered: bonus reward and signal termination
+        if (undiscovered_count == 0) {
+            for (int i = 0; i < N_AGENTS; ++i) rewards(env_idx, i) += 10.0f;
+            return true;
+        }
+        return false;
     }
 };
 
@@ -458,7 +499,11 @@ PYBIND11_MODULE(multi_agent_coverage, m) {
         .value("EXPECTED_OBS_UNDISCOVERED", EXPECTED_OBS_UNDISCOVERED_FEATURE);
 
     py::class_<BatchedEnvironment>(m, "BatchedEnvironment")
-        .def(py::init<int, int>(), py::arg("n_envs"), py::arg("seed") = 42)
+        .def(py::init<int, int, std::vector<std::string>, std::vector<std::string>>(), 
+            py::arg("n_envs"), 
+            py::arg("seed") = 42, 
+            py::arg("map_paths") = std::vector<std::string>(),
+            py::arg("expected_map_paths") = std::vector<std::string>())
         .def("reset", &BatchedEnvironment::reset)
         .def("step", &BatchedEnvironment::step, py::arg("actions"), py::arg("communication_prob") = -1.0f)
         .def("get_memory_view", &BatchedEnvironment::get_memory_view)
