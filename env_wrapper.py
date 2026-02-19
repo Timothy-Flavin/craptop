@@ -12,7 +12,12 @@ try:
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
-
+AGENT_COLORS = [
+    (0, 100, 255),
+    (255, 140, 0),
+    (0, 210, 100),
+    (220, 50, 220),
+]
 # Re-export FeatureType enum for convenience
 FeatureType = multi_agent_coverage.FeatureType
 
@@ -264,8 +269,8 @@ class BatchedGridEnv(gym.vector.VectorEnv):
             # Draw translucent white (255, 255, 255, 30)
             pygame.draw.rect(view_surface, (255, 255, 255, 30), view_rect)
 
-            # Draw Agent (Blue Circle)
-            pygame.draw.circle(self.screen, (0, 100, 255), (int(px), int(py)), int(self.cell_size * 0.4))
+            # Draw Agent (Colored Circle)
+            pygame.draw.circle(self.screen, AGENT_COLORS[i % len(AGENT_COLORS)], (int(px), int(py)), int(self.cell_size * 0.4))
             # Agent Border (White)
             pygame.draw.circle(self.screen, (255, 255, 255), (int(px), int(py)), int(self.cell_size * 0.4), 2)
 
