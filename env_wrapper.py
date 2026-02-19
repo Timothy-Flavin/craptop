@@ -10,8 +10,9 @@ import ctypes
 FeatureType = multi_agent_coverage.FeatureType
 
 class BatchedGridEnv(gym.vector.VectorEnv):
-    def __init__(self, num_envs, n_agents=4, map_size=32, device='cpu', render_mode=None):
+    def __init__(self, num_envs, n_agents=4, map_size=32, device='cpu', render_mode=None, seed=42, communication_prob=-1.0):
         self.num_envs = num_envs
+        self.communication_prob = communication_prob
         self.n_agents = n_agents
         self.map_size = map_size
         self.device = device
@@ -21,7 +22,7 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         self.cell_size = 20  # Pixels per grid cell
         
         # 1. Initialize C++ Backend
-        self.env = multi_agent_coverage.BatchedEnvironment(num_envs)
+        self.env = multi_agent_coverage.BatchedEnvironment(num_envs, seed)
         
         # 2. Define Spaces
         self.single_action_space = spaces.Box(
@@ -70,7 +71,7 @@ class BatchedGridEnv(gym.vector.VectorEnv):
             actions = actions.detach().cpu().numpy()
         
         flat_actions = actions.reshape(self.num_envs, -1).astype(np.float32)
-        rewards = self.env.step(flat_actions)
+        rewards = self.env.step(flat_actions, self.communication_prob)
         
         obs = self.state_tensor
         rewards = torch.from_numpy(rewards)

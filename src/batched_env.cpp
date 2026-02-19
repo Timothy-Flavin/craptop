@@ -132,10 +132,16 @@ void get_gravity(float* map, int pow, float agent_x, float agent_y, float& out_g
 class BatchedEnvironment {
 public:
     int num_envs;
+    int seed;
+    std::vector<std::mt19937> rngs;
     std::vector<float> data; 
 
-    BatchedEnvironment(int n_envs) : num_envs(n_envs) {
+    BatchedEnvironment(int n_envs, int sim_seed) : num_envs(n_envs), seed(sim_seed) {
         data.resize(num_envs * ENV_STRIDE);
+        rngs.resize(num_envs);
+        for(int i=0; i<num_envs; ++i) {
+            rngs[i].seed(seed + i);
+        }
         reset();
     }
 
@@ -188,7 +194,7 @@ public:
         }
     }
 
-    py::array_t<float> step(py::array_t<float> actions_array) {
+    py::array_t<float> step(py::array_t<float> actions_array, float communication_prob = -1.0f) {
         auto r = actions_array.unchecked<2>(); 
         py::array_t<float> rewards_array({num_envs, N_AGENTS});
         auto rewards_ptr = rewards_array.mutable_unchecked<2>();
@@ -201,7 +207,7 @@ public:
 
             update_locations(s, r, e);
             update_obs(s);
-            update_last_location(s);
+            update_last_location(s, e, communication_prob);
             calc_rewards(s, rewards_ptr, e);
         }
 
@@ -357,7 +363,10 @@ private:
         }
     }
 
-    void update_last_location(GameStateView& s) {
+    void update_last_location(GameStateView& s, int env_idx, float p) {
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        bool try_radio = (p > 0.0f && p <= 1.0f);
+
         // For each agent i (viewer/row agent), check if other agents j (target/col agent)
         // are within view range, and update their last known location if so
         for (int i = 0; i < N_AGENTS; ++i) {
@@ -365,15 +374,35 @@ private:
             int viewer_x = (int)s.agent_locations[i * 2 + 1];
             
             for (int j = 0; j < N_AGENTS; ++j) {
+                // If it's myself, always update (agents know where they are)
+                if (i == j) {
+                    s.last_agent_locations[i * (2 * N_AGENTS) + j * 2] = s.agent_locations[j * 2];
+                    s.last_agent_locations[i * (2 * N_AGENTS) + j * 2 + 1] = s.agent_locations[j * 2 + 1];
+                    continue;
+                }
+
                 int target_y = (int)s.agent_locations[j * 2];
                 int target_x = (int)s.agent_locations[j * 2 + 1];
                 
-                // Check if target agent j is within view range of viewer agent i
+                bool updated = false;
+
+                // Check physical view range (Visual)
                 if (std::abs(viewer_y - target_y) <= VIEW_RANGE && 
                     std::abs(viewer_x - target_x) <= VIEW_RANGE) {
+                    updated = true;
+                }
+                
+                // Check radio communication (Probabilistic)
+                // "agents should have a probability 'p' of sharing their location to another agent"
+                if (!updated && try_radio) {
+                    // Agent j shares location with agent i with probability p
+                    if (dist(rngs[env_idx]) < p) {
+                        updated = true;
+                    }
+                }
+
+                if (updated) {
                     // Update agent i's knowledge of agent j's location
-                    // Storage: last_agent_locations[i * (2 * N_AGENTS) + j * 2] = y
-                    //          last_agent_locations[i * (2 * N_AGENTS) + j * 2 + 1] = x
                     s.last_agent_locations[i * (2 * N_AGENTS) + j * 2] = s.agent_locations[j * 2];
                     s.last_agent_locations[i * (2 * N_AGENTS) + j * 2 + 1] = s.agent_locations[j * 2 + 1];
                 }
@@ -429,9 +458,9 @@ PYBIND11_MODULE(multi_agent_coverage, m) {
         .value("EXPECTED_OBS_UNDISCOVERED", EXPECTED_OBS_UNDISCOVERED_FEATURE);
 
     py::class_<BatchedEnvironment>(m, "BatchedEnvironment")
-        .def(py::init<int>())
+        .def(py::init<int, int>(), py::arg("n_envs"), py::arg("seed") = 42)
         .def("reset", &BatchedEnvironment::reset)
-        .def("step", &BatchedEnvironment::step)
+        .def("step", &BatchedEnvironment::step, py::arg("actions"), py::arg("communication_prob") = -1.0f)
         .def("get_memory_view", &BatchedEnvironment::get_memory_view)
         .def("get_stride", &BatchedEnvironment::get_stride)
         .def("get_flat_map_size", &BatchedEnvironment::get_flat_map_size)
