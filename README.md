@@ -159,10 +159,10 @@ obs, rewards, terminated, truncated, info = env.step(actions)
 
 Environments that terminate are **automatically reset** at the start of their next step.
 
-##### `get_gravity_attractions(feature_type, agent_mask=None, pow=2, normalize=False)`
+##### `get_gravity_attractions(feature_type, agent_mask=None, pow=2, normalize=False, local=False)`
 Compute gravity attraction vectors for each agent towards cells of a given feature map.
 
-The gravity force from each cell is: $\vec{F} = \text{mass} \cdot \hat{r} / r^{pow}$, summed over all cells.
+The gravity force from each cell is: $\vec{F} = \text{mass} \cdot \hat{r} / r^{pow}$, summed over all cells (or only cells within view range when `local=True`).
 
 ```python
 from env_wrapper import FeatureType
@@ -172,9 +172,12 @@ gravity = env.get_gravity_attractions(
     agent_mask=None,   # None = all agents; or np.array([True, True, False, False])
     pow=2,             # Distance power exponent (1 = linear falloff, 2 = quadratic)
     normalize=False,   # If True, scale output so max vector norm = 1.0
+    local=False,       # If True, only consider tiles/agents within VIEW_RANGE (7×7)
 )
 # Returns torch.Tensor of shape (num_envs, n_agents, 2) with (dy, dx) per agent
 ```
+
+**`local` mode**: When `local=True`, gravity is computed only over the 7×7 tiles the agent can currently see (or nearby agents within view range). This avoids the global attractor/repulsor problem where agents get pulled to map edges or stuck in the center. Particularly useful for `RECENCY_STALE` anti-pheromone navigation.
 
 **Feature Types:**
 
@@ -191,6 +194,10 @@ gravity = env.get_gravity_attractions(
 | `FeatureType.EXPECTED_OBS_UNDISCOVERED` | Per-agent expected undiscovered cells |
 | `FeatureType.OTHER_AGENTS` | Gravity from current positions of other agents |
 | `FeatureType.OTHER_AGENTS_LAST_KNOWN` | Gravity from last known positions of other agents |
+| `FeatureType.RECENCY` | Per-agent recency map — tiles in view are set to 1.0 each frame, then decay by ×0.99. Attracts toward recently visited areas |
+| `FeatureType.RECENCY_STALE` | Inverse of recency (1.0 − recency). Attracts toward areas NOT recently visited — acts as an anti-pheromone to push agents away from their current area |
+| `FeatureType.WALL_REPEL` | Repelling force from map border walls. Virtual tiles of mass 1.0 at x=−1, x=32, y=−1, y=32 push agents inward |
+| `FeatureType.WALL_ATTRACT` | Attracting force toward map border walls. Same virtual tiles pull agents toward the edges |
 
 **Agent Mask:**
 ```python
@@ -282,7 +289,10 @@ for step in range(1000):
     avoid_danger   = env.get_gravity_attractions(FeatureType.OBSERVED_DANGER,     normalize=True, pow=2)
     spread_out     = env.get_gravity_attractions(FeatureType.OTHER_AGENTS,         normalize=True, pow=1)
 
-    actions = toward_unknown - avoid_danger - spread_out
+    # Anti-pheromone: push agents away from areas they've recently visited
+    leave_area     = env.get_gravity_attractions(FeatureType.RECENCY_STALE, normalize=True, pow=1, local=True)
+
+    actions = toward_unknown - avoid_danger - spread_out + 0.3 * leave_area
     obs, rewards, terminated, truncated, info = env.step(actions)
 
 env.close()
@@ -290,7 +300,7 @@ env.close()
 
 ### Observation Space Layout
 
-The observation is a flattened float32 tensor with the following structure (15400 values total):
+The observation is a flattened float32 tensor with the following structure (19496 values total):
 
 ```
 Offset       | Size  | Content                  | Shape      | Range
@@ -303,6 +313,7 @@ Offset       | Size  | Content                  | Shape      | Range
 10248        | 4096  | Expected Obs             | (4, 32, 32)| [-1, 1]
 14344        | 32    | Last Agent Locations     | (4, 2, 4)  | [0, 31]
 14376        | 1024  | Global Discovered        | (32, 32)   | {0, 1}
+15400        | 4096  | Recency                  | (4, 32, 32)| [0, 1]
 ```
 
 Access slices:
@@ -318,7 +329,11 @@ obs_mask        = obs_np[2*fms:2*fms + n_agents*fms].reshape(n_agents, 32, 32)
 agent_locs_offset = (2 + 2*n_agents) * fms   # = 10240
 agent_locations   = obs_np[agent_locs_offset:agent_locs_offset + n_agents*2].reshape(n_agents, 2)
 
-discovered = obs_np[-fms:].reshape(32, 32)   # Global discovered map
+global_disc_offset = agent_locs_offset + n_agents*2 + n_agents*fms + n_agents*2*n_agents  # = 14376
+discovered = obs_np[global_disc_offset:global_disc_offset + fms].reshape(32, 32)
+
+recency_offset = global_disc_offset + fms  # = 15400
+recency = obs_np[recency_offset:recency_offset + n_agents*fms].reshape(n_agents, 32, 32)
 ```
 
 ## Recording Demonstrations
