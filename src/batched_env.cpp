@@ -280,6 +280,22 @@ public:
                 case WALL_ATTRACT_FEATURE:
                     get_gravity_wall(pow, agent_x, agent_y, gx, gy, local);
                     break;
+                case GLOBAL_VORONOI_UNDISCOVERED_FEATURE:
+                    if (local)
+                        get_gravity_voronoi_local(s.global_discovered, s.agent_locations, i, pow, agent_x, agent_y, gx, gy);
+                    else
+                        get_gravity_voronoi(s.global_discovered, s.agent_locations, i, pow, agent_x, agent_y, gx, gy);
+                    break;
+                case EXPECTED_VORONOI_UNDISCOVERED_FEATURE: {
+                    // Agent i's belief: expected_obs[i] for discovery, last_agent_locations[i] for positions
+                    float* eobs_i = s.expected_obs + i * FLAT_MAP_SIZE;
+                    float* last_locs_i = s.last_agent_locations + i * 2 * N_AGENTS;
+                    if (local)
+                        get_gravity_voronoi_local(eobs_i, last_locs_i, i, pow, agent_x, agent_y, gx, gy);
+                    else
+                        get_gravity_voronoi(eobs_i, last_locs_i, i, pow, agent_x, agent_y, gx, gy);
+                    break;
+                }
                 default:
                     gx = gy = 0.0f;
                     break;

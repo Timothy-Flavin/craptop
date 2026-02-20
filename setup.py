@@ -7,10 +7,10 @@ c_args = []
 l_args = []
 
 if sys.platform == "win32":
-    c_args = ['/openmp', '/O2']
+    c_args = ["/openmp", "/O2"]
 else:
-    c_args = ['-fopenmp', '-O3', '-march=native']
-    l_args = ['-fopenmp']
+    c_args = ["-fopenmp", "-O3", "-march=native"]
+    l_args = ["-fopenmp"]
 
 ext_modules = [
     Pybind11Extension(
@@ -29,7 +29,7 @@ ext_modules = [
 
 setuptools.setup(
     name="multi_agent_coverage",
-    version="0.1.3",
+    version="0.2.0",
     author="Your Name",
     description="High-performance batched multi-agent environment",
     packages=["multi_agent_coverage"],

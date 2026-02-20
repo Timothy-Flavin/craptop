@@ -375,15 +375,6 @@ if __name__ == "__main__":
     fps16 = 10000 / elapsed16 * 16
     print(f"Time: {elapsed16:.2f}s, FPS: {fps16:.1f}")
 
-    gtime = time.time()
-    for frames in range(1000):
-        for f in FeatureType:
-            gravity_observed = env16.get_gravity_attractions(
-                FeatureType.OBSERVED_DANGER, pow=2
-            )
-    gtime_end = time.time()
-    print(f"Time elappsed doing all gravity calcs {gtime_end - gtime}")
-    exit()
     # Gravity attractions test
     print("\n=== Gravity Attractions Test ===")
     gravity_observed = env16.get_gravity_attractions(FeatureType.OBSERVED_DANGER, pow=2)
@@ -414,28 +405,46 @@ if __name__ == "__main__":
 
     # Simple random walk
     last_action = actions = np.random.uniform(-1, 1, (16, 4, 2))
+    step = 0
+    gamma = 0.995
+    tot_r = 0.0
     try:
         while True:
             obs_masked = env.get_gravity_attractions(
-                FeatureType.GLOBAL_UNDISCOVERED, agent_mask=None, normalize=True, pow=1
+                FeatureType.GLOBAL_VORONOI_UNDISCOVERED,
+                agent_mask=None,
+                normalize=True,
+                pow=0,
             )
             danger_masked = env.get_gravity_attractions(
                 FeatureType.OBSERVED_DANGER, agent_mask=None, normalize=True, pow=2
+            )
+            recency_masked = env.get_gravity_attractions(
+                FeatureType.RECENCY_STALE, agent_mask=None, normalize=True, pow=2
             )
             other_masked = env.get_gravity_attractions(
                 FeatureType.OTHER_AGENTS, agent_mask=None, normalize=True, pow=1
             )
 
-            print(
-                f"Obs gravity sample: {obs_masked[0, 0].numpy()}, Danger gravity sample: {danger_masked[0, 0].numpy()}, Other agents gravity sample: {other_masked[0, 0].numpy()}"
-            )
+            # print(
+            #     f"Obs gravity sample: {obs_masked[0, 0].numpy()}, Danger gravity sample: {danger_masked[0, 0].numpy()}, Other agents gravity sample: {other_masked[0, 0].numpy()}"
+            # )
             actions = np.random.uniform(-1, 1, (16, 4, 2))
-            action = -danger_masked + obs_masked - other_masked + actions
+            action = (
+                -danger_masked
+                + 2 * obs_masked
+                - other_masked
+                + actions
+                - recency_masked
+            )
             obs, r, term, trunc, info = env.step(
                 0.5 * action + 0.5 * last_action
             )  # obs_masked.numpy() + actions - danger_masked.numpy() - other_masked.numpy())  # Add gravity to random actions
             last_action = action
-            if sum(r[0]) > 0:
-                print(f"Rewards: {r[0]}")
+            tot_r += sum(r[0]) * gamma**step
+            print(f"Discounded reward so far {tot_r} step: {step}")
+            step += 1
+            if term[0]:
+                exit()
     except KeyboardInterrupt:
         env.close()

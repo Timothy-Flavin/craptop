@@ -21,6 +21,8 @@ features = [
     FT.RECENCY_STALE,
     FT.WALL_REPEL,
     FT.WALL_ATTRACT,
+    FT.GLOBAL_VORONOI_UNDISCOVERED,
+    FT.EXPECTED_VORONOI_UNDISCOVERED,
 ]
 
 def bench(label, global_comms):

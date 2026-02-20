@@ -35,7 +35,9 @@ enum FeatureType
     RECENCY_FEATURE = 11,
     RECENCY_STALE_FEATURE = 12,
     WALL_REPEL_FEATURE = 13,
-    WALL_ATTRACT_FEATURE = 14
+    WALL_ATTRACT_FEATURE = 14,
+    GLOBAL_VORONOI_UNDISCOVERED_FEATURE = 15,
+    EXPECTED_VORONOI_UNDISCOVERED_FEATURE = 16
 };
 
 // ─── Gravity helpers ────────────────────────────────────────────────────────
@@ -331,6 +333,157 @@ inline void get_gravity_wall(int pow, float agent_x, float agent_y,
     out_gy = gy;
 }
 
+// Voronoi-partitioned undiscovered gravity (global).
+// Only undiscovered tiles for which agent `agent_idx` is the nearest agent
+// contribute.  This creates a territorial drive – each agent is pulled
+// toward its own Voronoi cell of frontier tiles.
+inline void get_gravity_voronoi(const float *__restrict disc_map,
+                                const float *__restrict all_locs,
+                                int agent_idx, int pow,
+                                float agent_x, float agent_y,
+                                float &out_gx, float &out_gy)
+{
+    float gx = 0.0f, gy = 0.0f;
+    const float my_y = all_locs[agent_idx * 2];
+    const float my_x = all_locs[agent_idx * 2 + 1];
+
+    for (int y = 0; y < MAP_SIZE; ++y)
+    {
+        const float fy = static_cast<float>(y);
+        const float dy_me = fy - my_y;
+        const float *row = disc_map + y * MAP_SIZE;
+        for (int x = 0; x < MAP_SIZE; ++x)
+        {
+            // Only undiscovered tiles (disc < 0.5 means not yet seen)
+            if (row[x] > 0.5f)
+                continue;
+
+            const float fx = static_cast<float>(x);
+            const float dx_me = fx - my_x;
+            const float dist_sq_me = dx_me * dx_me + dy_me * dy_me;
+
+            // Check if this agent is the closest
+            bool closest = true;
+            for (int j = 0; j < N_AGENTS; ++j)
+            {
+                if (j == agent_idx)
+                    continue;
+                const float dy_j = fy - all_locs[j * 2];
+                const float dx_j = fx - all_locs[j * 2 + 1];
+                if (dx_j * dx_j + dy_j * dy_j < dist_sq_me)
+                {
+                    closest = false;
+                    break;
+                }
+            }
+            if (!closest)
+                continue;
+
+            if (dist_sq_me < DIST_SQ_MIN)
+                continue;
+            const float dist = std::sqrt(dist_sq_me);
+            float denom;
+            switch (pow)
+            {
+            case 1:
+                denom = dist_sq_me;
+                break;
+            case 2:
+                denom = dist * dist_sq_me;
+                break;
+            default:
+            {
+                denom = dist;
+                for (int p = 0; p < pow; ++p)
+                    denom *= dist;
+                break;
+            }
+            }
+            const float f = 1.0f / denom;
+            gx += dx_me * f;
+            gy += dy_me * f;
+        }
+    }
+    out_gx = gx;
+    out_gy = gy;
+}
+
+// Voronoi-partitioned undiscovered gravity (local – VIEW_RANGE window).
+inline void get_gravity_voronoi_local(const float *__restrict disc_map,
+                                      const float *__restrict all_locs,
+                                      int agent_idx, int pow,
+                                      float agent_x, float agent_y,
+                                      float &out_gx, float &out_gy)
+{
+    float gx = 0.0f, gy = 0.0f;
+    const float my_y = all_locs[agent_idx * 2];
+    const float my_x = all_locs[agent_idx * 2 + 1];
+    const int yc = static_cast<int>(my_y);
+    const int xc = static_cast<int>(my_x);
+    const int y_s = std::max(0, yc - VIEW_RANGE);
+    const int y_e = std::min(MAP_SIZE, yc + VIEW_RANGE + 1);
+    const int x_s = std::max(0, xc - VIEW_RANGE);
+    const int x_e = std::min(MAP_SIZE, xc + VIEW_RANGE + 1);
+
+    for (int y = y_s; y < y_e; ++y)
+    {
+        const float fy = static_cast<float>(y);
+        const float dy_me = fy - my_y;
+        const float *row = disc_map + y * MAP_SIZE;
+        for (int x = x_s; x < x_e; ++x)
+        {
+            if (row[x] > 0.5f)
+                continue;
+
+            const float fx = static_cast<float>(x);
+            const float dx_me = fx - my_x;
+            const float dist_sq_me = dx_me * dx_me + dy_me * dy_me;
+
+            bool closest = true;
+            for (int j = 0; j < N_AGENTS; ++j)
+            {
+                if (j == agent_idx)
+                    continue;
+                const float dy_j = fy - all_locs[j * 2];
+                const float dx_j = fx - all_locs[j * 2 + 1];
+                if (dx_j * dx_j + dy_j * dy_j < dist_sq_me)
+                {
+                    closest = false;
+                    break;
+                }
+            }
+            if (!closest)
+                continue;
+
+            if (dist_sq_me < DIST_SQ_MIN)
+                continue;
+            const float dist = std::sqrt(dist_sq_me);
+            float denom;
+            switch (pow)
+            {
+            case 1:
+                denom = dist_sq_me;
+                break;
+            case 2:
+                denom = dist * dist_sq_me;
+                break;
+            default:
+            {
+                denom = dist;
+                for (int p = 0; p < pow; ++p)
+                    denom *= dist;
+                break;
+            }
+            }
+            const float f = 1.0f / denom;
+            gx += dx_me * f;
+            gy += dy_me * f;
+        }
+    }
+    out_gx = gx;
+    out_gy = gy;
+}
+
 // Dispatch helper: map gravity, local or global.
 inline void dispatch_map_gravity(const float *map, int pow,
                                  float agent_x, float agent_y,
@@ -375,4 +528,6 @@ inline void generate_procedural_danger(float *danger, int e)
         .value("RECENCY", RECENCY_FEATURE)                                     \
         .value("RECENCY_STALE", RECENCY_STALE_FEATURE)                         \
         .value("WALL_REPEL", WALL_REPEL_FEATURE)                               \
-        .value("WALL_ATTRACT", WALL_ATTRACT_FEATURE)
+        .value("WALL_ATTRACT", WALL_ATTRACT_FEATURE)                           \
+        .value("GLOBAL_VORONOI_UNDISCOVERED", GLOBAL_VORONOI_UNDISCOVERED_FEATURE) \
+        .value("EXPECTED_VORONOI_UNDISCOVERED", EXPECTED_VORONOI_UNDISCOVERED_FEATURE)

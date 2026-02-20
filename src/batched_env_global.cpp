@@ -276,6 +276,14 @@ public:
                 case WALL_ATTRACT_FEATURE:
                     get_gravity_wall(pow, agent_x, agent_y, gx, gy, local);
                     break;
+                // In global mode both Voronoi variants use the shared obs + true positions
+                case GLOBAL_VORONOI_UNDISCOVERED_FEATURE:
+                case EXPECTED_VORONOI_UNDISCOVERED_FEATURE:
+                    if (local)
+                        get_gravity_voronoi_local(s.obs, s.agent_locations, i, pow, agent_x, agent_y, gx, gy);
+                    else
+                        get_gravity_voronoi(s.obs, s.agent_locations, i, pow, agent_x, agent_y, gx, gy);
+                    break;
                 default:
                     gx = gy = 0.0f;
                     break;

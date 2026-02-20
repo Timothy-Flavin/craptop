@@ -14,7 +14,7 @@ A high-performance batched multi-agent environment built with C++ (pybind11) and
 - **Zero-Copy Memory**: Direct memory sharing between C++ backend and PyTorch tensors
 - **Gymnasium Compatible**: Standard `gym.vector.VectorEnv` interface
 - **Custom Maps**: Load PNG/JPG/BMP or raw binary danger maps; auto-conversion built in
-- **Gravity-Based Attractions**: Query attraction vectors towards 15 different map features for each agent
+- **Gravity-Based Attractions**: Query attraction vectors towards 17 different map features for each agent
 - **PyGame Visualization**: Real-time rendering of environment state with fog-of-war
 
 ## Installation
@@ -223,6 +223,27 @@ gravity = env.get_gravity_attractions(
 | `RECENCY_STALE` | Inverse of recency (1.0 − recency). Anti-pheromone effect | |
 | `WALL_REPEL` | Repelling force from map border walls | |
 | `WALL_ATTRACT` | Attracting force toward map border walls | |
+| `GLOBAL_VORONOI_UNDISCOVERED` | Voronoi-partitioned undiscovered tiles using oracle data (`global_discovered` + true agent positions) | Oracle info — suitable for reward shaping or centralized use; **not epistemically correct** for agent decisions in partial-obs |
+| `EXPECTED_VORONOI_UNDISCOVERED` | Voronoi-partitioned undiscovered tiles using agent *i*'s own belief (`expected_obs[i]` + `last_agent_locations[i]`) | Epistemically correct for decentralized decision-making in partial-obs; identical to `GLOBAL_VORONOI_UNDISCOVERED` in global-comms mode |
+
+**Voronoi / Territorial Gravity:**
+
+The two `VORONOI_UNDISCOVERED` variants assign each undiscovered tile to the **nearest agent** (Manhattan distance). Each agent only attracts toward the tiles in its own Voronoi territory, which prevents all agents from swarming toward the same final unexplored patch.
+
+| Variant | Discovery map | Agent positions used | Use case |
+|---|---|---|---|
+| `GLOBAL_VORONOI_UNDISCOVERED` | `global_discovered` (union of all agents' true obs) | True `agent_locations` | Reward shaping, centralized critics, global-comms mode |
+| `EXPECTED_VORONOI_UNDISCOVERED` | `expected_obs[i]` (agent *i*'s belief) | `last_agent_locations[i]` (last radio-reported positions) | Decentralized policy input in partial-obs |
+
+In **global-comms mode** both variants are identical (they both use the shared `obs` map and true positions). The distinction only matters in **partial-obs** mode, where `GLOBAL_VORONOI_UNDISCOVERED` leaks oracle information and should only be used outside the agent's policy network (e.g., to compute a shaped reward in the training loop).
+
+```python
+# Partial-obs: give each agent its own territorial gravity (epistemically correct)
+gravity = env.get_gravity_attractions(FeatureType.EXPECTED_VORONOI_UNDISCOVERED, pow=1)
+
+# Use GLOBAL variant only for reward shaping (not as policy input)
+global_gravity = env.get_gravity_attractions(FeatureType.GLOBAL_VORONOI_UNDISCOVERED, pow=1)
+```
 
 **Agent Mask:**
 ```python
