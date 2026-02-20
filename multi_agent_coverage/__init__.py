@@ -5,3 +5,6 @@
 #   from multi_agent_coverage.env_wrapper import BatchedGridEnv, FeatureType
 from ._core import *
 from ._core import FeatureType, BatchedEnvironment
+
+# Global-communication mode (smaller state, no expected_obs / last_agent_locations)
+from ._core_global import BatchedEnvironment as BatchedEnvironmentGlobal

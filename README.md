@@ -1,6 +1,6 @@
 # Multi-Agent Coverage Environment
 
-A high-performance batched multi-agent environment built with C++ (pybind11) and OpenMP for fast parallel simulation of agents exploring a 32×32 grid world with configurable danger maps.
+A high-performance batched multi-agent environment built with C++ (pybind11) and OpenMP for fast parallel simulation of agents exploring a 32×32 grid world with configurable danger maps. Supports two communication modes: **partial-observability** (radio) and **global-communication**.
 
 ## Demo
 
@@ -8,12 +8,13 @@ A high-performance batched multi-agent environment built with C++ (pybind11) and
 
 ## Features
 
-- **High-Performance**: ~11.5k FPS for single environment, ~134k FPS for 16 parallel environments
-- **Batched Simulation**: Run multiple independent environments efficiently in parallel
+- **High-Performance**: ~290k FPS (partial-obs) / ~325k FPS (global-comms) for 16 parallel environments
+- **Dual Communication Modes**: Partial-observability with radio or full global communication
+- **Batched Simulation**: Run multiple independent environments efficiently in parallel via OpenMP
 - **Zero-Copy Memory**: Direct memory sharing between C++ backend and PyTorch tensors
 - **Gymnasium Compatible**: Standard `gym.vector.VectorEnv` interface
 - **Custom Maps**: Load PNG/JPG/BMP or raw binary danger maps; auto-conversion built in
-- **Gravity-Based Attractions**: Query attraction vectors towards map features for each agent
+- **Gravity-Based Attractions**: Query attraction vectors towards 15 different map features for each agent
 - **PyGame Visualization**: Real-time rendering of environment state with fog-of-war
 
 ## Installation
@@ -36,10 +37,35 @@ pip install -e .
 ### Requirements
 
 - Python 3.10+
-- pybind11
+- pybind11 ≥ 2.6
 - Pillow (for PNG map conversion)
-- OpenGL-compatible system (for rendering)
-- GCC/Clang with OpenMP support
+- MSVC (Windows) or GCC/Clang (Linux) with OpenMP support
+
+## Project Structure
+
+```
+src/
+  gravity.h              # Shared header: constants, enums, gravity helpers
+  batched_env.cpp        # Partial-obs mode  → _core module
+  batched_env_global.cpp # Global-comms mode → _core_global module
+multi_agent_coverage/
+  __init__.py            # Re-exports BatchedEnvironment + BatchedEnvironmentGlobal
+  env_wrapper.py         # Gymnasium wrapper (BatchedGridEnv)
+setup.py                 # Builds both C++ extensions
+```
+
+## Communication Modes
+
+| | Partial-Obs (Radio) | Global-Comms |
+|---|---|---|
+| **Backend module** | `_core` | `_core_global` |
+| **State stride** | 19,496 floats | 8,200 floats |
+| **Observed danger** | Per-agent (4 × 1024) | Shared (1 × 1024) |
+| **Observation mask** | Per-agent (4 × 1024) | Shared (1 × 1024) |
+| **Expected obs** | Per-agent belief state | N/A (matches obs) |
+| **Last agent locations** | Per-agent belief about others | N/A (true positions known) |
+| **`communication_prob`** | Controls radio position updates | Ignored |
+| **Use case** | Decentralized / partial info | Centralized / full info |
 
 ## Maps
 
@@ -69,15 +95,10 @@ Any PNG, JPG, or BMP image can be passed directly — the wrapper auto-converts 
 
 Light pixels (`255`) map to `+1.0` (danger); dark pixels (`0`) map to `-1.0` (safe).
 
-### Provided Example Maps
-
-- `map0.png` — ground-truth danger map used when no `maps` argument is provided in examples
-- `expected_map0.png` — prior belief map used as `expected_maps` in examples
-
 ### Converting Maps Manually
 
 ```python
-from env_wrapper import convert_map
+from multi_agent_coverage.env_wrapper import convert_map
 
 # Convert a PNG to a .bin file (saved alongside the image)
 bin_path = convert_map("my_map.png")            # -> "my_map.bin"
@@ -88,8 +109,6 @@ Or use the standalone script:
 
 ```bash
 python map_converter.py
-# Enter path to input PNG: map0.png
-# Enter path for output .bin: map0.bin
 ```
 
 ### Creating Maps Programmatically
@@ -113,7 +132,7 @@ High-level gymnasium-compatible wrapper around the C++ environment.
 #### Constructor
 
 ```python
-from env_wrapper import BatchedGridEnv, FeatureType
+from multi_agent_coverage.env_wrapper import BatchedGridEnv, FeatureType
 
 env = BatchedGridEnv(
     num_envs=16,              # Number of parallel environments
@@ -122,11 +141,14 @@ env = BatchedGridEnv(
     device='cpu',             # PyTorch device ('cpu' or 'cuda')
     render_mode=None,         # 'human' for pygame window, None for headless
     seed=42,                  # Random seed for procedural map generation
-    communication_prob=-1.0,  # Probability [0,1] of radio updates; -1 disables
+    communication_prob=-1.0,  # Probability [0,1] of radio updates; -1 disables (partial-obs only)
     maps=None,                # str path or list of str paths to ground-truth maps
     expected_maps=None,       # str path or list of str paths to prior belief maps
+    global_comms=False,       # If True, use global-communication backend
 )
 ```
+
+**`global_comms`**: When `True`, switches to the global-communication backend where all agents share a single observation mask and observed danger map, know each other's true positions, and require no `expected_obs` or `last_agent_locations` tracking. The state stride drops from 19,496 to 8,200 floats (~2.4× smaller), improving cache locality and throughput.
 
 **Map arguments** accept:
 - `None` — procedural sine/cosine map is generated per environment
@@ -141,7 +163,8 @@ Reset all environments and return observations.
 
 ```python
 obs, info = env.reset()
-# obs: torch.Tensor of shape (num_envs, stride) where stride = 15400
+# obs: torch.Tensor of shape (num_envs, stride)
+#   stride = 19496 (partial-obs) or 8200 (global-comms)
 ```
 
 ##### `step(actions)`
@@ -157,6 +180,8 @@ obs, rewards, terminated, truncated, info = env.step(actions)
 # truncated:  torch.Tensor (num_envs,) bool — always False (no time limit)
 ```
 
+In partial-obs mode, `communication_prob` (set in the constructor) is passed to the C++ `step()` to control probabilistic radio position updates between agents. In global-comms mode it is not used.
+
 Environments that terminate are **automatically reset** at the start of their next step.
 
 ##### `get_gravity_attractions(feature_type, agent_mask=None, pow=2, normalize=False, local=False)`
@@ -165,7 +190,7 @@ Compute gravity attraction vectors for each agent towards cells of a given featu
 The gravity force from each cell is: $\vec{F} = \text{mass} \cdot \hat{r} / r^{pow}$, summed over all cells (or only cells within view range when `local=True`).
 
 ```python
-from env_wrapper import FeatureType
+from multi_agent_coverage.env_wrapper import FeatureType
 
 gravity = env.get_gravity_attractions(
     feature_type=FeatureType.GLOBAL_UNDISCOVERED,
@@ -181,23 +206,23 @@ gravity = env.get_gravity_attractions(
 
 **Feature Types:**
 
-| Feature Type | Description |
-|---|---|
-| `FeatureType.EXPECTED_DANGER` | Prior belief danger map (global, same for all agents) |
-| `FeatureType.ACTUAL_DANGER` | True ground-truth danger map (global) |
-| `FeatureType.OBSERVED_DANGER` | Per-agent observed danger (updated as cells are visited) |
-| `FeatureType.OBS` | Per-agent binary observation mask (1 = cell has been seen) |
-| `FeatureType.EXPECTED_OBS` | Per-agent expected observation map |
-| `FeatureType.GLOBAL_DISCOVERED` | Global binary discovery map (union of all agents' obs) |
-| `FeatureType.GLOBAL_UNDISCOVERED` | Inverse of global discovery (attracts toward unseen cells) |
-| `FeatureType.OBS_UNDISCOVERED` | Per-agent undiscovered cells |
-| `FeatureType.EXPECTED_OBS_UNDISCOVERED` | Per-agent expected undiscovered cells |
-| `FeatureType.OTHER_AGENTS` | Gravity from current positions of other agents |
-| `FeatureType.OTHER_AGENTS_LAST_KNOWN` | Gravity from last known positions of other agents |
-| `FeatureType.RECENCY` | Per-agent recency map — tiles in view are set to 1.0 each frame, then decay by ×0.99. Attracts toward recently visited areas |
-| `FeatureType.RECENCY_STALE` | Inverse of recency (1.0 − recency). Attracts toward areas NOT recently visited — acts as an anti-pheromone to push agents away from their current area |
-| `FeatureType.WALL_REPEL` | Repelling force from map border walls. Virtual tiles of mass 1.0 at x=−1, x=32, y=−1, y=32 push agents inward |
-| `FeatureType.WALL_ATTRACT` | Attracting force toward map border walls. Same virtual tiles pull agents toward the edges |
+| Feature Type | Description | Notes |
+|---|---|---|
+| `EXPECTED_DANGER` | Prior belief danger map (shared) | |
+| `ACTUAL_DANGER` | True ground-truth danger map (shared) | |
+| `OBSERVED_DANGER` | Observed danger (updated as cells are visited) | Per-agent in partial-obs; shared in global |
+| `OBS` | Binary observation mask (1 = cell has been seen) | Per-agent in partial-obs; shared in global |
+| `EXPECTED_OBS` | Agent's belief about what all agents have observed | Partial-obs only; aliases to `OBS` in global |
+| `GLOBAL_DISCOVERED` | Global binary discovery map (union of all agents' obs) | Same as `OBS` in global mode |
+| `GLOBAL_UNDISCOVERED` | Inverse of global discovery (attracts toward unseen cells) | |
+| `OBS_UNDISCOVERED` | Per-agent undiscovered cells | Aliases to `GLOBAL_UNDISCOVERED` in global |
+| `EXPECTED_OBS_UNDISCOVERED` | Per-agent expected undiscovered cells | Aliases to `GLOBAL_UNDISCOVERED` in global |
+| `OTHER_AGENTS` | Gravity from current positions of other agents | |
+| `OTHER_AGENTS_LAST_KNOWN` | Gravity from last known positions of other agents | Same as `OTHER_AGENTS` in global mode |
+| `RECENCY` | Per-agent recency map — tiles in view set to 1.0 each frame, decay by ×0.99 | |
+| `RECENCY_STALE` | Inverse of recency (1.0 − recency). Anti-pheromone effect | |
+| `WALL_REPEL` | Repelling force from map border walls | |
+| `WALL_ATTRACT` | Attracting force toward map border walls | |
 
 **Agent Mask:**
 ```python
@@ -231,17 +256,13 @@ except KeyboardInterrupt:
 ##### `close()`
 Close the pygame window and release resources.
 
-```python
-env.close()
-```
-
 ## Usage Examples
 
 ### Basic Loop
 
 ```python
 import numpy as np
-from env_wrapper import BatchedGridEnv
+from multi_agent_coverage.env_wrapper import BatchedGridEnv
 
 env = BatchedGridEnv(num_envs=8, n_agents=4)
 obs, _ = env.reset()
@@ -249,7 +270,39 @@ obs, _ = env.reset()
 for step in range(1000):
     actions = np.random.uniform(-1, 1, (8, 4, 2))
     obs, rewards, terminated, truncated, info = env.step(actions)
-    print(f"Step {step}, Rewards: {rewards}")
+
+env.close()
+```
+
+### Global-Comms Mode
+
+```python
+from multi_agent_coverage.env_wrapper import BatchedGridEnv
+
+# Global communication — 2.4× smaller state, ~12% faster stepping
+env = BatchedGridEnv(num_envs=16, global_comms=True)
+obs, _ = env.reset()
+print(f"Stride: {obs.shape[1]}")  # 8200 instead of 19496
+
+for _ in range(1000):
+    actions = np.random.uniform(-1, 1, (16, 4, 2))
+    obs, rewards, terminated, truncated, info = env.step(actions)
+
+env.close()
+```
+
+### Partial-Obs with Radio Communication
+
+```python
+from multi_agent_coverage.env_wrapper import BatchedGridEnv
+
+# Agents update each other's positions with 30% probability per step
+env = BatchedGridEnv(num_envs=16, communication_prob=0.3, global_comms=False)
+obs, _ = env.reset()
+
+for _ in range(1000):
+    actions = np.random.uniform(-1, 1, (16, 4, 2))
+    obs, rewards, terminated, truncated, info = env.step(actions)
 
 env.close()
 ```
@@ -257,7 +310,7 @@ env.close()
 ### With Custom Maps
 
 ```python
-from env_wrapper import BatchedGridEnv
+from multi_agent_coverage.env_wrapper import BatchedGridEnv
 
 # Same map for all envs (PNG auto-converted to .bin on first run)
 env = BatchedGridEnv(
@@ -277,7 +330,7 @@ env = BatchedGridEnv(
 ### Gravity-Based Navigation
 
 ```python
-from env_wrapper import BatchedGridEnv, FeatureType
+from multi_agent_coverage.env_wrapper import BatchedGridEnv, FeatureType
 import numpy as np
 
 env = BatchedGridEnv(num_envs=16, maps="map0.png", expected_maps="expected_map0.png")
@@ -287,7 +340,7 @@ for step in range(1000):
     # Pull toward undiscovered areas, away from danger and other agents
     toward_unknown = env.get_gravity_attractions(FeatureType.GLOBAL_UNDISCOVERED, normalize=True, pow=1)
     avoid_danger   = env.get_gravity_attractions(FeatureType.OBSERVED_DANGER,     normalize=True, pow=2)
-    spread_out     = env.get_gravity_attractions(FeatureType.OTHER_AGENTS,         normalize=True, pow=1)
+    spread_out     = env.get_gravity_attractions(FeatureType.OTHER_AGENTS,        normalize=True, pow=1)
 
     # Anti-pheromone: push agents away from areas they've recently visited
     leave_area     = env.get_gravity_attractions(FeatureType.RECENCY_STALE, normalize=True, pow=1, local=True)
@@ -298,43 +351,44 @@ for step in range(1000):
 env.close()
 ```
 
-### Observation Space Layout
+## Observation Space Layout
 
-The observation is a flattened float32 tensor with the following structure (19496 values total):
+### Partial-Obs Mode (stride = 19,496)
 
 ```
-Offset       | Size  | Content                  | Shape      | Range
--------------|-------|--------------------------|------------|----------
-0            | 1024  | Expected Danger          | (32, 32)   | [-1, 1]
-1024         | 1024  | Actual Danger            | (32, 32)   | [-1, 1]
-2048         | 4096  | Observed Danger          | (4, 32, 32)| [-1, 1]
-6144         | 4096  | Observation Mask         | (4, 32, 32)| {0, 1}
-10240        | 8     | Agent Locations          | (4, 2)     | [0, 31] [y, x]
-10248        | 4096  | Expected Obs             | (4, 32, 32)| [-1, 1]
-14344        | 32    | Last Agent Locations     | (4, 2, 4)  | [0, 31]
-14376        | 1024  | Global Discovered        | (32, 32)   | {0, 1}
-15400        | 4096  | Recency                  | (4, 32, 32)| [0, 1]
+Offset  | Size  | Content                  | Shape         | Range
+--------|-------|--------------------------|---------------|----------
+0       | 1024  | Expected Danger          | (32, 32)      | [-1, 1]
+1024    | 1024  | Actual Danger            | (32, 32)      | [-1, 1]
+2048    | 4096  | Observed Danger (×4)     | (4, 32, 32)   | [-1, 1]
+6144    | 4096  | Observation Mask (×4)    | (4, 32, 32)   | {0, 1}
+10240   | 8     | Agent Locations          | (4, 2)        | [0, 31] [y, x]
+10248   | 4096  | Expected Obs (×4)        | (4, 32, 32)   | {0, 1}
+14344   | 32    | Last Agent Locations     | (4, 4, 2)     | [0, 31]
+14376   | 1024  | Global Discovered        | (32, 32)      | {0, 1}
+15400   | 4096  | Recency (×4)             | (4, 32, 32)   | [0, 1]
 ```
 
-Access slices:
-```python
-obs_np = obs[0].numpy()   # First environment
-fms = 32 * 32             # FLAT_MAP_SIZE = 1024
-n_agents = 4
+- **Observed Danger**: Each agent's own observed danger map. Initialized from `expected_danger`, updated with `actual_danger` as tiles enter view.
+- **Expected Obs**: Agent *i*'s belief about what *all* agents have observed, based on `last_agent_locations[i]`. Cumulative (never cleared).
+- **Last Agent Locations**: Agent *i*'s last known position of agent *j*, updated when *j* is within view range or via radio communication.
 
-expected_danger = obs_np[0:fms].reshape(32, 32)
-actual_danger   = obs_np[fms:2*fms].reshape(32, 32)
-obs_mask        = obs_np[2*fms:2*fms + n_agents*fms].reshape(n_agents, 32, 32)
+### Global-Comms Mode (stride = 8,200)
 
-agent_locs_offset = (2 + 2*n_agents) * fms   # = 10240
-agent_locations   = obs_np[agent_locs_offset:agent_locs_offset + n_agents*2].reshape(n_agents, 2)
-
-global_disc_offset = agent_locs_offset + n_agents*2 + n_agents*fms + n_agents*2*n_agents  # = 14376
-discovered = obs_np[global_disc_offset:global_disc_offset + fms].reshape(32, 32)
-
-recency_offset = global_disc_offset + fms  # = 15400
-recency = obs_np[recency_offset:recency_offset + n_agents*fms].reshape(n_agents, 32, 32)
 ```
+Offset  | Size  | Content                  | Shape         | Range
+--------|-------|--------------------------|---------------|----------
+0       | 1024  | Expected Danger          | (32, 32)      | [-1, 1]
+1024    | 1024  | Actual Danger            | (32, 32)      | [-1, 1]
+2048    | 1024  | Observed Danger (shared) | (32, 32)      | [-1, 1]
+3072    | 1024  | Obs / Global Discovered  | (32, 32)      | {0, 1}
+4096    | 8     | Agent Locations          | (4, 2)        | [0, 31] [y, x]
+4104    | 4096  | Recency (×4)             | (4, 32, 32)   | [0, 1]
+```
+
+- All agents share a single observed danger map and observation mask.
+- `obs` serves as the global discovered map (single source of truth).
+- No `expected_obs` or `last_agent_locations` — agents know everything.
 
 ## Recording Demonstrations
 
@@ -344,20 +398,16 @@ Generate an animated GIF matching the pygame renderer:
 python gif.py
 ```
 
-The output `demo.gif` shows:
-- **Black cells**: undiscovered (fog of war)
-- **Green → Yellow → Red**: discovered cells from safe to dangerous
-- **Translucent boxes**: each agent's 7×7 view range
-- **Blue circles with white border**: agents
-
 ## Performance
 
-Benchmark results (on typical Linux machine with OpenMP):
+Benchmark results (16 parallel environments, 10k frames, Windows / MSVC with OpenMP):
 
-| Config | FPS |
-|--------|-----|
-| 1 env, 10k frames | ~11,500 |
-| 16 envs, 10k frames | ~134,000 (scaled) |
+| Mode | Stride | Step FPS | Gravity Calls/s |
+|------|--------|----------|-----------------|
+| Partial-obs | 19,496 | ~290,000 | ~18,000 |
+| Global-comms | 8,200 | ~325,000 | ~18,000 |
+
+Global-comms mode is ~12% faster at stepping due to the smaller state stride and fewer per-step computations. Gravity performance is similar since it's dominated by the tile iteration, not state size.
 
 ## Environment Details
 
@@ -367,9 +417,10 @@ Benchmark results (on typical Linux machine with OpenMP):
 - **Agent Speed**: 0.5 cells/step (reduced in danger zones)
 - **View Range**: 3 cells (7×7 view window)
 - **Danger Scale**: `[-1.0, 1.0]` — negative is safe, positive is dangerous
+- **Recency Decay**: ×0.99 per frame
 
 ### Rewards
-Agents receive `+1.0` reward (split equally) for each newly discovered cell. The episode terminates when all 1024 cells are discovered.
+Agents receive `+1.0` reward (split equally among agents that can see the tile) for each newly discovered cell. A `+10.0` bonus is awarded to all agents when all 1024 cells are discovered, ending the episode.
 
 ### Dynamics
 - Action vectors are L2-normalized before being applied
@@ -379,29 +430,21 @@ Agents receive `+1.0` reward (split equally) for each newly discovered cell. The
 
 ## Building from Source
 
-The extension requires a C++ compiler with OpenMP:
+The package builds two C++ extensions:
+
+| Extension | Source | Purpose |
+|-----------|--------|---------|
+| `_core` | `src/batched_env.cpp` | Partial-obs mode |
+| `_core_global` | `src/batched_env_global.cpp` | Global-comms mode |
+
+Both include the shared header `src/gravity.h` containing constants, the `FeatureType` enum, and all gravity computation functions.
 
 ```bash
 # Install build dependencies
 pip install pybind11 setuptools build pillow
 
-# Build in-place for testing
-python setup.py build_ext --inplace
-
-# Or use modern build system
-python -m build
-```
-
-## Publishing to PyPI
-
-```bash
-# Local build and publish
-export PYPI_API_TOKEN="your-token-here"
-./build_and_publish.sh
-
-# Or via GitHub Actions (requires PYPI_API_TOKEN secret):
-git tag v0.1.0
-git push origin v0.1.0
+# Install in editable mode (compiles both extensions)
+pip install -e .
 ```
 
 ## License

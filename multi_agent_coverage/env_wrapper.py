@@ -1,7 +1,8 @@
 import gymnasium as gym
 import numpy as np
 import torch
-from . import _core as multi_agent_coverage
+from . import _core as _core_partial
+from . import _core_global as _core_global_mod
 from gymnasium import spaces
 import pygame
 import ctypes
@@ -18,8 +19,8 @@ AGENT_COLORS = [
     (0, 210, 100),
     (220, 50, 220),
 ]
-# Re-export FeatureType enum for convenience
-FeatureType = multi_agent_coverage.FeatureType
+# Re-export FeatureType enum for convenience (same in both modules)
+FeatureType = _core_partial.FeatureType
 
 
 def convert_map(image_path, output_path=None):
@@ -95,13 +96,16 @@ def _process_map_list(maps_arg, num_envs, arg_name="maps"):
 
 class BatchedGridEnv(gym.vector.VectorEnv):
     def __init__(self, num_envs, n_agents=4, map_size=32, device='cpu', render_mode=None, seed=42, communication_prob=-1.0, 
-                 maps=None, expected_maps=None):
+                 maps=None, expected_maps=None, global_comms=False):
         """
         maps: Path or list of paths to ground truth danger maps.
         expected_maps: Path or list of paths to prior belief maps (e.g. satellite data).
+        global_comms: If True, use the global-communication backend (shared obs,
+                      no expected_obs/last_agent_locations, ~2.4x smaller state).
         """
         self.num_envs = num_envs
         self.communication_prob = communication_prob
+        self.global_comms = global_comms
         self.n_agents = n_agents
         self.map_size = map_size
         self.device = device
@@ -114,8 +118,9 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         processed_maps = _process_map_list(maps, num_envs, "maps")
         processed_expected_maps = _process_map_list(expected_maps, num_envs, "expected_maps")
 
-        # 2. Initialize C++ Backend
-        self.env = multi_agent_coverage.BatchedEnvironment(
+        # 2. Initialize C++ Backend (pick module based on mode)
+        backend = _core_global_mod if global_comms else _core_partial
+        self.env = backend.BatchedEnvironment(
             num_envs, seed, processed_maps, processed_expected_maps
         )
         
@@ -150,11 +155,22 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         
         # Pre-calculate slice indices for faster rendering
         fms = self.env.get_flat_map_size()
-        self.sl_actual_danger = slice(fms, 2*fms)
-        # agent_locations offset: (2 + 2*N_AGENTS)*FLAT_MAP_SIZE
-        agent_locs_offset = (2 + 2*n_agents) * fms
-        self.sl_agent_locs = slice(agent_locs_offset, agent_locs_offset + n_agents*2)
-        self.sl_global_disc = slice(stride - fms, stride) # Last section
+
+        if global_comms:
+            # Global layout: expected_danger | actual_danger | observed_danger | obs | agent_locs | recency
+            self.sl_actual_danger = slice(fms, 2 * fms)
+            agent_locs_offset = 4 * fms
+            self.sl_agent_locs = slice(agent_locs_offset, agent_locs_offset + n_agents * 2)
+            # obs (= global_discovered) is at offset 3*fms
+            self.sl_global_disc = slice(3 * fms, 4 * fms)
+        else:
+            # Partial layout: expected | actual | observed_danger[N] | obs[N] | agent_locs | expected_obs[N] | last_locs | global_disc | recency[N]
+            self.sl_actual_danger = slice(fms, 2 * fms)
+            agent_locs_offset = (2 + 2 * n_agents) * fms
+            self.sl_agent_locs = slice(agent_locs_offset, agent_locs_offset + n_agents * 2)
+            # global_discovered starts after last_agent_locations
+            gd_offset = agent_locs_offset + n_agents * 2 + n_agents * fms + n_agents * 2 * n_agents
+            self.sl_global_disc = slice(gd_offset, gd_offset + fms)
 
     def reset(self, seed=None, options=None):
         self.env.reset()
@@ -166,7 +182,11 @@ class BatchedGridEnv(gym.vector.VectorEnv):
             actions = actions.detach().cpu().numpy()
         
         flat_actions = actions.reshape(self.num_envs, -1).astype(np.float32)
-        rewards, terminated_np = self.env.step(flat_actions, self.communication_prob)
+
+        if self.global_comms:
+            rewards, terminated_np = self.env.step(flat_actions)
+        else:
+            rewards, terminated_np = self.env.step(flat_actions, self.communication_prob)
         
         obs = self.state_tensor
         rewards = torch.from_numpy(rewards)

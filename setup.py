@@ -19,6 +19,12 @@ ext_modules = [
         extra_compile_args=c_args,
         extra_link_args=l_args,
     ),
+    Pybind11Extension(
+        "multi_agent_coverage._core_global",
+        ["src/batched_env_global.cpp"],
+        extra_compile_args=c_args,
+        extra_link_args=l_args,
+    ),
 ]
 
 setuptools.setup(
