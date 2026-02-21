@@ -64,13 +64,16 @@ public:
     std::vector<bool> env_terminated;
     std::vector<int> undiscovered_remaining;
     bool reset_automatically;
+    float death_penalty;
 
     BatchedEnvironmentGlobal(int n_envs, int sim_seed,
                              std::vector<std::string> maps = {},
                              std::vector<std::string> expected_maps = {},
-                             bool auto_reset = true)
+                             bool auto_reset = true,
+                             float death_penalty_val = -20.0f)
         : num_envs(n_envs), seed(sim_seed), map_paths(std::move(maps)),
-          expected_map_paths(std::move(expected_maps)), reset_automatically(auto_reset)
+          expected_map_paths(std::move(expected_maps)), reset_automatically(auto_reset),
+          death_penalty(death_penalty_val)
     {
         data.resize(static_cast<size_t>(num_envs) * ENV_STRIDE_GLOBAL, 0.0f);
         rngs.resize(num_envs);
@@ -227,7 +230,7 @@ public:
                     if (dist01(rngs[e]) < p_death)
                     {
                         s.agents_alive[i] = 0.0f;
-                        rewards_ptr(e, i) += DEATH_PENALTY;
+                        rewards_ptr(e, i) += death_penalty;
                     }
                 }
             }
@@ -546,15 +549,17 @@ PYBIND11_MODULE(_core_global, m)
     // FeatureType enum is already registered by _core – do NOT re-register here.
 
     py::class_<BatchedEnvironmentGlobal>(m, "BatchedEnvironment")
-        .def(py::init<int, int, std::vector<std::string>, std::vector<std::string>, bool>(),
+        .def(py::init<int, int, std::vector<std::string>, std::vector<std::string>, bool, float>(),
              py::arg("n_envs"),
              py::arg("seed") = 42,
              py::arg("map_paths") = std::vector<std::string>(),
              py::arg("expected_map_paths") = std::vector<std::string>(),
-             py::arg("reset_automatically") = true)
+             py::arg("reset_automatically") = true,
+             py::arg("death_penalty") = -20.0f)
         .def("reset", &BatchedEnvironmentGlobal::reset)
         .def("reset_single", &BatchedEnvironmentGlobal::reset_single, py::arg("env_idx"))
         .def_readwrite("reset_automatically", &BatchedEnvironmentGlobal::reset_automatically)
+        .def_readwrite("death_penalty", &BatchedEnvironmentGlobal::death_penalty)
         .def("step", &BatchedEnvironmentGlobal::step,
              py::arg("actions"))
         .def("get_memory_view", &BatchedEnvironmentGlobal::get_memory_view)

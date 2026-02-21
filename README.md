@@ -59,11 +59,13 @@ setup.py                 # Builds both C++ extensions
 | | Partial-Obs (Radio) | Global-Comms |
 |---|---|---|
 | **Backend module** | `_core` | `_core_global` |
-| **State stride** | 19,496 floats | 8,200 floats |
+| **State stride** | 19,516 floats | 8,204 floats |
 | **Observed danger** | Per-agent (4 × 1024) | Shared (1 × 1024) |
 | **Observation mask** | Per-agent (4 × 1024) | Shared (1 × 1024) |
 | **Expected obs** | Per-agent belief state | N/A (matches obs) |
 | **Last agent locations** | Per-agent belief about others | N/A (true positions known) |
+| **`agents_alive`** | Ground-truth alive flags (4 floats) | Ground-truth alive flags (4 floats) |
+| **`agents_last_alive`** | Per-agent belief about others' alive status (4×4 floats) | N/A (ground truth known) |
 | **`communication_prob`** | Controls radio position updates | Ignored |
 | **Use case** | Decentralized / partial info | Centralized / full info |
 
@@ -146,6 +148,7 @@ env = BatchedGridEnv(
     expected_maps=None,       # str path or list of str paths to prior belief maps
     global_comms=False,       # If True, use global-communication backend
     reset_automatically=True, # If False, terminated envs freeze until reset_env(i) is called
+    death_penalty=-20.0,      # Reward applied to an agent the step it dies; 0.0 to disable
 )
 ```
 
@@ -154,6 +157,8 @@ env = BatchedGridEnv(
 **`reset_automatically`**: Controls what happens when an environment terminates (all cells discovered):
 - `True` (default) — the environment resets itself automatically at the start of the next `step()` call. Seamless for standard RL training loops.
 - `False` — terminated environments freeze: `step()` returns the last observed state unchanged, `terminated=True`, and `rewards=0` for that environment until `reset_env(i)` or `reset()` is called manually. Useful when you need to process the terminal state before resetting (e.g., logging episode statistics, applying curriculum changes, or seeding the next episode with a specific map).
+
+**`death_penalty`**: Scalar reward added to an agent the step it dies (default `-20.0`). Set to `0.0` to keep the alive/dead state tracking while removing the penalty signal. Can also be changed at runtime via `env.env.death_penalty = <value>`.
 
 **Map arguments** accept:
 - `None` — procedural sine/cosine map is generated per environment
@@ -169,7 +174,7 @@ Reset all environments and return observations.
 ```python
 obs, info = env.reset()
 # obs: torch.Tensor of shape (num_envs, stride)
-#   stride = 19496 (partial-obs) or 8200 (global-comms)
+#   stride = 19516 (partial-obs) or 8204 (global-comms)
 ```
 
 ##### `step(actions)`
@@ -245,8 +250,8 @@ gravity = env.get_gravity_attractions(
 | `RECENCY_STALE` | Inverse of recency (1.0 − recency). Anti-pheromone effect | |
 | `WALL_REPEL` | Repelling force from map border walls | |
 | `WALL_ATTRACT` | Attracting force toward map border walls | |
-| `GLOBAL_VORONOI_UNDISCOVERED` | Voronoi-partitioned undiscovered tiles using oracle data (`global_discovered` + true agent positions) | Oracle info — suitable for reward shaping or centralized use; **not epistemically correct** for agent decisions in partial-obs |
-| `EXPECTED_VORONOI_UNDISCOVERED` | Voronoi-partitioned undiscovered tiles using agent *i*'s own belief (`expected_obs[i]` + `last_agent_locations[i]`) | Epistemically correct for decentralized decision-making in partial-obs; identical to `GLOBAL_VORONOI_UNDISCOVERED` in global-comms mode |
+| `GLOBAL_VORONOI_UNDISCOVERED` | Voronoi-partitioned undiscovered tiles using oracle data (`global_discovered` + true agent positions); dead agents are excluded from the partition | Oracle info — suitable for reward shaping or centralized use; **not epistemically correct** for agent decisions in partial-obs |
+| `EXPECTED_VORONOI_UNDISCOVERED` | Voronoi-partitioned undiscovered tiles using agent *i*'s own belief (`expected_obs[i]` + `last_agent_locations[i]`); agents believed dead are excluded | Epistemically correct for decentralized decision-making in partial-obs; identical to `GLOBAL_VORONOI_UNDISCOVERED` in global-comms mode |
 
 **Voronoi / Territorial Gravity:**
 
@@ -396,7 +401,7 @@ env.close()
 
 ## Observation Space Layout
 
-### Partial-Obs Mode (stride = 19,496)
+### Partial-Obs Mode (stride = 19,516)
 
 ```
 Offset  | Size  | Content                  | Shape         | Range
@@ -410,13 +415,17 @@ Offset  | Size  | Content                  | Shape         | Range
 14344   | 32    | Last Agent Locations     | (4, 4, 2)     | [0, 31]
 14376   | 1024  | Global Discovered        | (32, 32)      | {0, 1}
 15400   | 4096  | Recency (×4)             | (4, 32, 32)   | [0, 1]
+19496   | 4     | Agents Alive             | (4,)          | {0, 1}
+19500   | 16    | Agents Last Alive        | (4, 4)        | {0, 1}
 ```
 
 - **Observed Danger**: Each agent's own observed danger map. Initialized from `expected_danger`, updated with `actual_danger` as tiles enter view.
 - **Expected Obs**: Agent *i*'s belief about what *all* agents have observed, based on `last_agent_locations[i]`. Cumulative (never cleared).
 - **Last Agent Locations**: Agent *i*'s last known position of agent *j*, updated when *j* is within view range or via radio communication.
+- **Agents Alive**: Ground-truth alive status for each agent (`1.0` = alive, `0.0` = dead). Reset to `1.0` on episode reset.
+- **Agents Last Alive**: Agent *i*'s belief about whether agent *j* is alive, updated alongside `last_agent_locations` via line-of-sight and radio. Shape `(4, 4)` — row *i* is agent *i*'s belief about all agents.
 
-### Global-Comms Mode (stride = 8,200)
+### Global-Comms Mode (stride = 8,204)
 
 ```
 Offset  | Size  | Content                  | Shape         | Range
@@ -427,11 +436,13 @@ Offset  | Size  | Content                  | Shape         | Range
 3072    | 1024  | Obs / Global Discovered  | (32, 32)      | {0, 1}
 4096    | 8     | Agent Locations          | (4, 2)        | [0, 31] [y, x]
 4104    | 4096  | Recency (×4)             | (4, 32, 32)   | [0, 1]
+8200    | 4     | Agents Alive             | (4,)          | {0, 1}
 ```
 
 - All agents share a single observed danger map and observation mask.
 - `obs` serves as the global discovered map (single source of truth).
 - No `expected_obs` or `last_agent_locations` — agents know everything.
+- **Agents Alive**: Ground-truth alive status (`1.0` / `0.0`). All agents have full visibility of this in global-comms mode.
 
 ## Recording Demonstrations
 
@@ -447,8 +458,8 @@ Benchmark results (16 parallel environments, 10k frames, Windows / MSVC with Ope
 
 | Mode | Stride | Step FPS | Gravity Calls/s |
 |------|--------|----------|-----------------|
-| Partial-obs | 19,496 | ~290,000 | ~18,000 |
-| Global-comms | 8,200 | ~325,000 | ~18,000 |
+| Partial-obs | 19,516 | ~290,000 | ~18,000 |
+| Global-comms | 8,204 | ~325,000 | ~18,000 |
 
 Global-comms mode is ~12% faster at stepping due to the smaller state stride and fewer per-step computations. Gravity performance is similar since it's dominated by the tile iteration, not state size.
 
@@ -463,11 +474,31 @@ Global-comms mode is ~12% faster at stepping due to the smaller state stride and
 - **Recency Decay**: ×0.99 per frame
 
 ### Rewards
-Agents receive `+1.0` reward (split equally among agents that can see the tile) for each newly discovered cell. A `+10.0` bonus is awarded to all agents when all 1024 cells are discovered, ending the episode.
+Agents receive `+1.0` reward (split equally among agents that can see the tile) for each newly discovered cell. A `+10.0` bonus is awarded to all agents when all 1024 cells are discovered, ending the episode. An agent that dies receives `death_penalty` (default `-20.0`) on the step of death.
+
+### Agent Death
+At the end of each step, every **alive** agent that is standing on a tile with `danger > 0.0` has a chance of dying:
+
+$$p_{\text{death}} = \frac{\text{danger}}{\text{DANGER\_FACTOR}}$$
+
+where `DANGER_FACTOR = 5.0` (a compile-time constant). At the maximum danger value of `+1.0` this gives a 20% chance of death per step. At `danger = 0.5` it is 10%, and tiles with `danger ≤ 0.0` are completely safe.
+
+**Dead agent behaviour:**
+- Speed is set to zero — the agent's position is frozen.
+- The agent's reward channel still receives rewards (e.g., it cannot earn discovery rewards while frozen, but continues to receive episode-level signals).
+- `agents_alive[i]` is set to `0.0` in the state buffer.
+- The death penalty (`death_penalty`, configurable at construction and mutable at runtime) is applied once on the step of death.
+
+**Information propagation:**
+- In **partial-obs** mode: an agent immediately learns its own death. Teammates learn about a death only when they observe the downed agent via line-of-sight or radio (same mechanism as position updates). Both `last_agent_locations[i][j]` and `agents_last_alive[i][j]` are updated together. The Voronoi gravity (`EXPECTED_VORONOI_UNDISCOVERED`) excludes agents that observer *i* believes to be dead.
+- In **global-comms** mode: all agents immediately learn of every death via shared `agents_alive`. The Voronoi gravity (`GLOBAL_VORONOI_UNDISCOVERED`) excludes dead agents.
+
+Dead agents persist until the episode ends (or `reset_env(i)` is called). There is currently no revive mechanic.
 
 ### Dynamics
 - Action vectors are L2-normalized before being applied
 - Effective speed per step: `SPEED × (1 - 0.8 × danger)` at the agent's current cell
+- **Dead agents do not move** (effective speed = 0 regardless of action)
 - Agent positions are clamped to `[0, 31.99]` on both axes
 - Terminated environments auto-reset at the start of their next `step()` call (when `reset_automatically=True`, the default). Set `reset_automatically=False` to freeze terminated environments and reset them manually with `reset_env(i)`.
 

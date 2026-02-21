@@ -17,7 +17,6 @@ constexpr float RECENCY_DECAY = 0.99f;
 constexpr float MAP_MAX = MAP_SIZE - 0.01f;
 constexpr float DIST_SQ_MIN = 0.001f;
 constexpr float DANGER_FACTOR = 1.0f;
-constexpr float DEATH_PENALTY = -20.0f;
 
 // ─── Feature type enum (identical in both modes) ────────────────────────────
 

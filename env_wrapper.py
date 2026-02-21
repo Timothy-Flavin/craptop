@@ -114,6 +114,7 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         maps=None,
         expected_maps=None,
         reset_automatically=True,
+        death_penalty=-20.0,
     ):
         """
         maps: Path or list of paths to ground truth danger maps.
@@ -122,10 +123,13 @@ class BatchedGridEnv(gym.vector.VectorEnv):
             reset at the start of their next step(). If False, terminated environments
             hold their last state and continue returning terminated=True and zero rewards
             until reset_env(i) or reset() is called explicitly.
+        death_penalty: Reward applied to an agent the step it dies (default -20.0).
+            Set to 0.0 to disable the penalty while keeping the death mechanic.
         """
         self.num_envs = num_envs
         self.communication_prob = communication_prob
         self.reset_automatically = reset_automatically
+        self.death_penalty = death_penalty
         self.n_agents = n_agents
         self.map_size = map_size
         self.device = device
@@ -142,7 +146,12 @@ class BatchedGridEnv(gym.vector.VectorEnv):
 
         # 2. Initialize C++ Backend
         self.env = multi_agent_coverage.BatchedEnvironment(
-            num_envs, seed, processed_maps, processed_expected_maps, reset_automatically
+            num_envs,
+            seed,
+            processed_maps,
+            processed_expected_maps,
+            reset_automatically,
+            death_penalty,
         )
 
         # 3. Define Spaces
@@ -190,10 +199,14 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         self.sl_recency = slice(recency_offset, recency_offset + n_agents * fms)
         # agents_alive offset (right after recency)
         agents_alive_offset = recency_offset + n_agents * fms
-        self.sl_agents_alive = slice(agents_alive_offset, agents_alive_offset + n_agents)
+        self.sl_agents_alive = slice(
+            agents_alive_offset, agents_alive_offset + n_agents
+        )
         # agents_last_alive offset (right after agents_alive)
         agents_last_alive_offset = agents_alive_offset + n_agents
-        self.sl_agents_last_alive = slice(agents_last_alive_offset, agents_last_alive_offset + n_agents * n_agents)
+        self.sl_agents_last_alive = slice(
+            agents_last_alive_offset, agents_last_alive_offset + n_agents * n_agents
+        )
 
     def reset(self, seed=None, options=None):
         self.env.reset()
