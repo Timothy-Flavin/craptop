@@ -20,6 +20,12 @@
 
 #include "gravity.h"
 
+#ifndef ssize_t
+#  ifdef _WIN32
+     typedef ptrdiff_t ssize_t;
+#  endif
+#endif
+
 namespace py = pybind11;
 
 // --- State layout (global-comms) ---
@@ -184,6 +190,19 @@ public:
     std::pair<size_t, size_t> get_memory_view()
     {
         return {reinterpret_cast<size_t>(data.data()), data.size() * sizeof(float)};
+    }
+
+    // Returns a writable numpy array that is a zero-copy view of the state buffer.
+    // Python can read and modify state in-place; no data is copied.
+    py::array_t<float> get_state()
+    {
+        py::capsule base(data.data(), [](void *) {});  // no-op: memory owned by C++
+        return py::array_t<float>(
+            {static_cast<ssize_t>(num_envs), static_cast<ssize_t>(ENV_STRIDE_GLOBAL)},
+            {static_cast<ssize_t>(ENV_STRIDE_GLOBAL) * static_cast<ssize_t>(sizeof(float)),
+             static_cast<ssize_t>(sizeof(float))},
+            data.data(),
+            base);
     }
 
     int get_stride() const { return ENV_STRIDE_GLOBAL; }
@@ -478,6 +497,7 @@ PYBIND11_MODULE(_core_global, m)
         .def("step", &BatchedEnvironmentGlobal::step,
              py::arg("actions"))
         .def("get_memory_view", &BatchedEnvironmentGlobal::get_memory_view)
+        .def("get_state", &BatchedEnvironmentGlobal::get_state)
         .def("get_stride", &BatchedEnvironmentGlobal::get_stride)
         .def("get_flat_map_size", &BatchedEnvironmentGlobal::get_flat_map_size)
         .def("get_gravity_attractions", &BatchedEnvironmentGlobal::get_gravity_attractions,

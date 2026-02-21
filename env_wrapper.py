@@ -441,6 +441,7 @@ if __name__ == "__main__":
                 0.5 * action + 0.5 * last_action
             )  # obs_masked.numpy() + actions - danger_masked.numpy() - other_masked.numpy())  # Add gravity to random actions
             last_action = action
+
             tot_r += sum(r[0]) * gamma**step
             print(f"Discounded reward so far {tot_r} step: {step}")
             step += 1
