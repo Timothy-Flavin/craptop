@@ -31,12 +31,13 @@ namespace py = pybind11;
 // --- State layout (global-comms) ---
 
 constexpr int ENV_STRIDE_GLOBAL =
-    FLAT_MAP_SIZE +             // expected_danger   (prior belief)
-    FLAT_MAP_SIZE +             // actual_danger     (ground truth)
-    FLAT_MAP_SIZE +             // observed_danger   (shared across agents)
-    FLAT_MAP_SIZE +             // obs               (shared = global_discovered)
-    (N_AGENTS * 2) +            // agent_locations   (true positions, known to all)
-    (N_AGENTS * FLAT_MAP_SIZE); // recency           (per-agent)
+    FLAT_MAP_SIZE +              // expected_danger   (prior belief)
+    FLAT_MAP_SIZE +              // actual_danger     (ground truth)
+    FLAT_MAP_SIZE +              // observed_danger   (shared across agents)
+    FLAT_MAP_SIZE +              // obs               (shared = global_discovered)
+    (N_AGENTS * 2) +             // agent_locations   (true positions, known to all)
+    (N_AGENTS * FLAT_MAP_SIZE) + // recency           (per-agent)
+    N_AGENTS;                    // agents_alive      (ground truth, 1.0=alive 0.0=dead)
 
 struct GameStateViewGlobal
 {
@@ -46,6 +47,7 @@ struct GameStateViewGlobal
     float *obs; // shared observation mask (= global_discovered)
     float *agent_locations;
     float *recency;
+    float *agents_alive;
 };
 
 // --- BatchedEnvironmentGlobal ---
@@ -93,6 +95,8 @@ public:
         s.agent_locations = ptr;
         ptr += N_AGENTS * 2;
         s.recency = ptr;
+        ptr += N_AGENTS * FLAT_MAP_SIZE;
+        s.agents_alive = ptr;
     }
 
     void reset_env(GameStateViewGlobal &s, int e)
@@ -140,6 +144,10 @@ public:
 
         // Init observed_danger from expected_danger (shared, single copy)
         std::memcpy(s.observed_danger, s.expected_danger, FLAT_MAP_SIZE * sizeof(float));
+
+        // Init agents_alive = 1.0
+        for (int i = 0; i < N_AGENTS; ++i)
+            s.agents_alive[i] = 1.0f;
 
         // Discover initial view and set obs
         undiscovered_remaining[e] = FLAT_MAP_SIZE;
@@ -203,6 +211,27 @@ public:
             }
 
             update_locations(s, r, e);
+
+            // Death roll: alive agents on danger > 0 tiles may die
+            for (int i = 0; i < N_AGENTS; ++i)
+            {
+                if (s.agents_alive[i] < 0.5f)
+                    continue;
+                const int cy = std::clamp(static_cast<int>(s.agent_locations[i * 2]), 0, MAP_SIZE - 1);
+                const int cx = std::clamp(static_cast<int>(s.agent_locations[i * 2 + 1]), 0, MAP_SIZE - 1);
+                const float danger = s.actual_danger[cy * MAP_SIZE + cx];
+                if (danger > 0.0f)
+                {
+                    const float p_death = danger / DANGER_FACTOR;
+                    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+                    if (dist01(rngs[e]) < p_death)
+                    {
+                        s.agents_alive[i] = 0.0f;
+                        rewards_ptr(e, i) += DEATH_PENALTY;
+                    }
+                }
+            }
+
             // Combined discover + obs update + rewards
             bool done = discover_reward_and_update_obs(s, rewards_ptr, e);
             update_recency(s);
@@ -324,9 +353,9 @@ public:
                 case GLOBAL_VORONOI_UNDISCOVERED_FEATURE:
                 case EXPECTED_VORONOI_UNDISCOVERED_FEATURE:
                     if (local)
-                        get_gravity_voronoi_local(s.obs, s.agent_locations, i, pow, agent_x, agent_y, gx, gy);
+                        get_gravity_voronoi_local(s.obs, s.agent_locations, i, pow, agent_x, agent_y, gx, gy, s.agents_alive);
                     else
-                        get_gravity_voronoi(s.obs, s.agent_locations, i, pow, agent_x, agent_y, gx, gy);
+                        get_gravity_voronoi(s.obs, s.agent_locations, i, pow, agent_x, agent_y, gx, gy, s.agents_alive);
                     break;
                 default:
                     gx = gy = 0.0f;
@@ -358,6 +387,10 @@ private:
     {
         for (int i = 0; i < N_AGENTS; ++i)
         {
+            // Dead agents don't move
+            if (s.agents_alive[i] < 0.5f)
+                continue;
+
             float dy = actions(env_idx, i * 2);
             float dx = actions(env_idx, i * 2 + 1);
 

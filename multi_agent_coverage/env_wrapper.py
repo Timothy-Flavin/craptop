@@ -162,20 +162,30 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         fms = self.env.get_flat_map_size()
 
         if global_comms:
-            # Global layout: expected_danger | actual_danger | observed_danger | obs | agent_locs | recency
+            # Global layout: expected_danger | actual_danger | observed_danger | obs | agent_locs | recency[N] | agents_alive
             self.sl_actual_danger = slice(fms, 2 * fms)
             agent_locs_offset = 4 * fms
             self.sl_agent_locs = slice(agent_locs_offset, agent_locs_offset + n_agents * 2)
             # obs (= global_discovered) is at offset 3*fms
             self.sl_global_disc = slice(3 * fms, 4 * fms)
+            # agents_alive: after recency
+            recency_offset = agent_locs_offset + n_agents * 2
+            agents_alive_offset = recency_offset + n_agents * fms
+            self.sl_agents_alive = slice(agents_alive_offset, agents_alive_offset + n_agents)
         else:
-            # Partial layout: expected | actual | observed_danger[N] | obs[N] | agent_locs | expected_obs[N] | last_locs | global_disc | recency[N]
+            # Partial layout: expected | actual | observed_danger[N] | obs[N] | agent_locs | expected_obs[N] | last_locs | global_disc | recency[N] | agents_alive | agents_last_alive[N*N]
             self.sl_actual_danger = slice(fms, 2 * fms)
             agent_locs_offset = (2 + 2 * n_agents) * fms
             self.sl_agent_locs = slice(agent_locs_offset, agent_locs_offset + n_agents * 2)
             # global_discovered starts after last_agent_locations
             gd_offset = agent_locs_offset + n_agents * 2 + n_agents * fms + n_agents * 2 * n_agents
             self.sl_global_disc = slice(gd_offset, gd_offset + fms)
+            # agents_alive + agents_last_alive: after recency
+            recency_offset = gd_offset + fms
+            agents_alive_offset = recency_offset + n_agents * fms
+            self.sl_agents_alive = slice(agents_alive_offset, agents_alive_offset + n_agents)
+            agents_last_alive_offset = agents_alive_offset + n_agents
+            self.sl_agents_last_alive = slice(agents_last_alive_offset, agents_last_alive_offset + n_agents * n_agents)
 
     def reset(self, seed=None, options=None):
         self.env.reset()

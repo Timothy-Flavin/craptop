@@ -16,6 +16,8 @@ constexpr int FLAT_MAP_SIZE = MAP_SIZE * MAP_SIZE;
 constexpr float RECENCY_DECAY = 0.99f;
 constexpr float MAP_MAX = MAP_SIZE - 0.01f;
 constexpr float DIST_SQ_MIN = 0.001f;
+constexpr float DANGER_FACTOR = 1.0f;
+constexpr float DEATH_PENALTY = -20.0f;
 
 // ─── Feature type enum (identical in both modes) ────────────────────────────
 
@@ -283,37 +285,37 @@ inline void get_gravity_wall(int pow, float agent_x, float agent_y,
         const int yc = static_cast<int>(agent_y);
         const int xc = static_cast<int>(agent_x);
 
-        // Top wall (y = -1)
+        // Top wall (y = -1.1)
         if (yc + 1 <= VIEW_RANGE)
         {
             const int xs = std::max(-1, xc - VIEW_RANGE);
             const int xe = std::min(MAP_SIZE, xc + VIEW_RANGE) + 1;
             for (int x = xs; x < xe; ++x)
-                accumulate_tile(static_cast<float>(x), -1.0f);
+                accumulate_tile(static_cast<float>(x), -1.1f);
         }
-        // Bottom wall (y = MAP_SIZE)
+        // Bottom wall (y = MAP_SIZE + 0.1)
         if (MAP_SIZE - yc <= VIEW_RANGE)
         {
             const int xs = std::max(-1, xc - VIEW_RANGE);
             const int xe = std::min(MAP_SIZE, xc + VIEW_RANGE) + 1;
             for (int x = xs; x < xe; ++x)
-                accumulate_tile(static_cast<float>(x), static_cast<float>(MAP_SIZE));
+                accumulate_tile(static_cast<float>(x), static_cast<float>(MAP_SIZE) + 0.1f);
         }
-        // Left wall (x = -1)
+        // Left wall (x = -1.1)
         if (xc + 1 <= VIEW_RANGE)
         {
             const int ys = std::max(-1, yc - VIEW_RANGE);
             const int ye = std::min(MAP_SIZE, yc + VIEW_RANGE) + 1;
             for (int y = ys; y < ye; ++y)
-                accumulate_tile(-1.0f, static_cast<float>(y));
+                accumulate_tile(-1.1f, static_cast<float>(y));
         }
-        // Right wall (x = MAP_SIZE)
+        // Right wall (x = MAP_SIZE + 0.1)
         if (MAP_SIZE - xc <= VIEW_RANGE)
         {
             const int ys = std::max(-1, yc - VIEW_RANGE);
             const int ye = std::min(MAP_SIZE, yc + VIEW_RANGE) + 1;
             for (int y = ys; y < ye; ++y)
-                accumulate_tile(static_cast<float>(MAP_SIZE), static_cast<float>(y));
+                accumulate_tile(static_cast<float>(MAP_SIZE) + 0.1f, static_cast<float>(y));
         }
     }
     else
@@ -322,10 +324,10 @@ inline void get_gravity_wall(int pow, float agent_x, float agent_y,
         for (int i = -1; i <= MAP_SIZE; ++i)
         {
             const float fi = static_cast<float>(i);
-            accumulate_tile(fi, -1.0f);
-            accumulate_tile(fi, static_cast<float>(MAP_SIZE));
-            accumulate_tile(-1.0f, fi);
-            accumulate_tile(static_cast<float>(MAP_SIZE), fi);
+            accumulate_tile(fi, -1.1f);
+            accumulate_tile(fi, static_cast<float>(MAP_SIZE) + 0.1f);
+            accumulate_tile(-1.1f, fi);
+            accumulate_tile(static_cast<float>(MAP_SIZE) + 0.1f, fi);
         }
     }
 
@@ -341,7 +343,8 @@ inline void get_gravity_voronoi(const float *__restrict disc_map,
                                 const float *__restrict all_locs,
                                 int agent_idx, int pow,
                                 float agent_x, float agent_y,
-                                float &out_gx, float &out_gy)
+                                float &out_gx, float &out_gy,
+                                const float *alive = nullptr)
 {
     float gx = 0.0f, gy = 0.0f;
     const float my_y = all_locs[agent_idx * 2];
@@ -362,12 +365,14 @@ inline void get_gravity_voronoi(const float *__restrict disc_map,
             const float dx_me = fx - my_x;
             const float dist_sq_me = dx_me * dx_me + dy_me * dy_me;
 
-            // Check if this agent is the closest
+            // Check if this agent is the closest (skip dead agents)
             bool closest = true;
             for (int j = 0; j < N_AGENTS; ++j)
             {
                 if (j == agent_idx)
                     continue;
+                if (alive && alive[j] < 0.5f)
+                    continue; // dead agent doesn't compete
                 const float dy_j = fy - all_locs[j * 2];
                 const float dx_j = fx - all_locs[j * 2 + 1];
                 if (dx_j * dx_j + dy_j * dy_j < dist_sq_me)
@@ -413,7 +418,8 @@ inline void get_gravity_voronoi_local(const float *__restrict disc_map,
                                       const float *__restrict all_locs,
                                       int agent_idx, int pow,
                                       float agent_x, float agent_y,
-                                      float &out_gx, float &out_gy)
+                                      float &out_gx, float &out_gy,
+                                      const float *alive = nullptr)
 {
     float gx = 0.0f, gy = 0.0f;
     const float my_y = all_locs[agent_idx * 2];
@@ -444,6 +450,8 @@ inline void get_gravity_voronoi_local(const float *__restrict disc_map,
             {
                 if (j == agent_idx)
                     continue;
+                if (alive && alive[j] < 0.5f)
+                    continue; // dead agent doesn't compete
                 const float dy_j = fy - all_locs[j * 2];
                 const float dx_j = fx - all_locs[j * 2 + 1];
                 if (dx_j * dx_j + dy_j * dy_j < dist_sq_me)
@@ -512,22 +520,22 @@ inline void generate_procedural_danger(float *danger, int e)
 }
 
 // Shared pybind11 FeatureType registration macro
-#define REGISTER_FEATURE_TYPE_ENUM(m)                                          \
-    py::enum_<FeatureType>(m, "FeatureType")                                   \
-        .value("EXPECTED_DANGER", EXPECTED_DANGER_FEATURE)                     \
-        .value("ACTUAL_DANGER", ACTUAL_DANGER_FEATURE)                         \
-        .value("OBSERVED_DANGER", OBSERVED_DANGER_FEATURE)                     \
-        .value("OBS", OBS_FEATURE)                                             \
-        .value("EXPECTED_OBS", EXPECTED_OBS_FEATURE)                           \
-        .value("GLOBAL_DISCOVERED", GLOBAL_DISCOVERED_FEATURE)                 \
-        .value("OTHER_AGENTS", OTHER_AGENTS_FEATURE)                           \
-        .value("OTHER_AGENTS_LAST_KNOWN", OTHER_AGENTS_LAST_KNOWN_FEATURE)     \
-        .value("GLOBAL_UNDISCOVERED", GLOBAL_UNDISCOVERED_FEATURE)             \
-        .value("OBS_UNDISCOVERED", OBS_UNDISCOVERED_FEATURE)                   \
-        .value("EXPECTED_OBS_UNDISCOVERED", EXPECTED_OBS_UNDISCOVERED_FEATURE) \
-        .value("RECENCY", RECENCY_FEATURE)                                     \
-        .value("RECENCY_STALE", RECENCY_STALE_FEATURE)                         \
-        .value("WALL_REPEL", WALL_REPEL_FEATURE)                               \
-        .value("WALL_ATTRACT", WALL_ATTRACT_FEATURE)                           \
+#define REGISTER_FEATURE_TYPE_ENUM(m)                                              \
+    py::enum_<FeatureType>(m, "FeatureType")                                       \
+        .value("EXPECTED_DANGER", EXPECTED_DANGER_FEATURE)                         \
+        .value("ACTUAL_DANGER", ACTUAL_DANGER_FEATURE)                             \
+        .value("OBSERVED_DANGER", OBSERVED_DANGER_FEATURE)                         \
+        .value("OBS", OBS_FEATURE)                                                 \
+        .value("EXPECTED_OBS", EXPECTED_OBS_FEATURE)                               \
+        .value("GLOBAL_DISCOVERED", GLOBAL_DISCOVERED_FEATURE)                     \
+        .value("OTHER_AGENTS", OTHER_AGENTS_FEATURE)                               \
+        .value("OTHER_AGENTS_LAST_KNOWN", OTHER_AGENTS_LAST_KNOWN_FEATURE)         \
+        .value("GLOBAL_UNDISCOVERED", GLOBAL_UNDISCOVERED_FEATURE)                 \
+        .value("OBS_UNDISCOVERED", OBS_UNDISCOVERED_FEATURE)                       \
+        .value("EXPECTED_OBS_UNDISCOVERED", EXPECTED_OBS_UNDISCOVERED_FEATURE)     \
+        .value("RECENCY", RECENCY_FEATURE)                                         \
+        .value("RECENCY_STALE", RECENCY_STALE_FEATURE)                             \
+        .value("WALL_REPEL", WALL_REPEL_FEATURE)                                   \
+        .value("WALL_ATTRACT", WALL_ATTRACT_FEATURE)                               \
         .value("GLOBAL_VORONOI_UNDISCOVERED", GLOBAL_VORONOI_UNDISCOVERED_FEATURE) \
         .value("EXPECTED_VORONOI_UNDISCOVERED", EXPECTED_VORONOI_UNDISCOVERED_FEATURE)

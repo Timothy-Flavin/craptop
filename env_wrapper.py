@@ -188,6 +188,12 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         # recency offset (per-agent, right after global_discovered)
         recency_offset = global_disc_offset + fms
         self.sl_recency = slice(recency_offset, recency_offset + n_agents * fms)
+        # agents_alive offset (right after recency)
+        agents_alive_offset = recency_offset + n_agents * fms
+        self.sl_agents_alive = slice(agents_alive_offset, agents_alive_offset + n_agents)
+        # agents_last_alive offset (right after agents_alive)
+        agents_last_alive_offset = agents_alive_offset + n_agents
+        self.sl_agents_last_alive = slice(agents_last_alive_offset, agents_last_alive_offset + n_agents * n_agents)
 
     def reset(self, seed=None, options=None):
         self.env.reset()

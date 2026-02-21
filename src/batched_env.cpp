@@ -36,7 +36,9 @@ constexpr int ENV_STRIDE =
     (N_AGENTS * FLAT_MAP_SIZE) + // expected_obs          (per-agent belief about all agents' obs)
     (N_AGENTS * 2 * N_AGENTS) +  // last_agent_locations  (per-agent belief about others' positions)
     FLAT_MAP_SIZE +              // global_discovered     (env-level, for rewards)
-    (N_AGENTS * FLAT_MAP_SIZE);  // recency               (per-agent)
+    (N_AGENTS * FLAT_MAP_SIZE) + // recency               (per-agent)
+    N_AGENTS +                   // agents_alive          (ground truth, 1.0=alive 0.0=dead)
+    (N_AGENTS * N_AGENTS);       // agents_last_alive     (per-agent belief about others' alive status)
 
 struct GameStateView {
     float* expected_danger;
@@ -48,6 +50,8 @@ struct GameStateView {
     float* last_agent_locations;
     float* global_discovered;
     float* recency;
+    float* agents_alive;
+    float* agents_last_alive;
 };
 
 // --- BatchedEnvironment (partial-obs) ---
@@ -90,7 +94,9 @@ public:
         s.expected_obs         = ptr; ptr += N_AGENTS * FLAT_MAP_SIZE;
         s.last_agent_locations = ptr; ptr += N_AGENTS * 2 * N_AGENTS;
         s.global_discovered    = ptr; ptr += FLAT_MAP_SIZE;
-        s.recency              = ptr;
+        s.recency              = ptr; ptr += N_AGENTS * FLAT_MAP_SIZE;
+        s.agents_alive         = ptr; ptr += N_AGENTS;
+        s.agents_last_alive    = ptr;
     }
 
     void reset_env(GameStateView& s, int e) {
@@ -139,6 +145,12 @@ public:
         for (int i = 0; i < N_AGENTS; ++i)
             std::memcpy(s.observed_danger + i * FLAT_MAP_SIZE,
                         s.expected_danger, FLAT_MAP_SIZE * sizeof(float));
+
+        // Init agents_alive = 1.0, agents_last_alive = 1.0
+        for (int i = 0; i < N_AGENTS; ++i)
+            s.agents_alive[i] = 1.0f;
+        for (int i = 0; i < N_AGENTS * N_AGENTS; ++i)
+            s.agents_last_alive[i] = 1.0f;
 
         undiscovered_remaining[e] = FLAT_MAP_SIZE;
         update_obs(s);
@@ -198,6 +210,27 @@ public:
             }
 
             update_locations(s, r, e);
+
+            // Death roll: alive agents on danger > 0 tiles may die
+            for (int i = 0; i < N_AGENTS; ++i) {
+                if (s.agents_alive[i] < 0.5f) continue;
+                const int cy = std::clamp(static_cast<int>(s.agent_locations[i * 2]), 0, MAP_SIZE - 1);
+                const int cx = std::clamp(static_cast<int>(s.agent_locations[i * 2 + 1]), 0, MAP_SIZE - 1);
+                const float danger = s.actual_danger[cy * MAP_SIZE + cx];
+                if (danger > 0.0f) {
+                    const float p_death = danger / DANGER_FACTOR;
+                    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+                    if (dist01(rngs[e]) < p_death) {
+                        s.agents_alive[i] = 0.0f;
+                        // Agent knows it died
+                        float* my_last_alive = s.agents_last_alive + i * N_AGENTS;
+                        my_last_alive[i] = 0.0f;
+                        // Apply death penalty
+                        rewards_ptr(e, i) += DEATH_PENALTY;
+                    }
+                }
+            }
+
             update_obs(s);
             update_recency(s);
             update_last_location(s, e, communication_prob);
@@ -321,18 +354,19 @@ public:
                     break;
                 case GLOBAL_VORONOI_UNDISCOVERED_FEATURE:
                     if (local)
-                        get_gravity_voronoi_local(s.global_discovered, s.agent_locations, i, pow, agent_x, agent_y, gx, gy);
+                        get_gravity_voronoi_local(s.global_discovered, s.agent_locations, i, pow, agent_x, agent_y, gx, gy, s.agents_alive);
                     else
-                        get_gravity_voronoi(s.global_discovered, s.agent_locations, i, pow, agent_x, agent_y, gx, gy);
+                        get_gravity_voronoi(s.global_discovered, s.agent_locations, i, pow, agent_x, agent_y, gx, gy, s.agents_alive);
                     break;
                 case EXPECTED_VORONOI_UNDISCOVERED_FEATURE: {
                     // Agent i's belief: expected_obs[i] for discovery, last_agent_locations[i] for positions
                     float* eobs_i = s.expected_obs + i * FLAT_MAP_SIZE;
                     float* last_locs_i = s.last_agent_locations + i * 2 * N_AGENTS;
+                    float* last_alive_i = s.agents_last_alive + i * N_AGENTS;
                     if (local)
-                        get_gravity_voronoi_local(eobs_i, last_locs_i, i, pow, agent_x, agent_y, gx, gy);
+                        get_gravity_voronoi_local(eobs_i, last_locs_i, i, pow, agent_x, agent_y, gx, gy, last_alive_i);
                     else
-                        get_gravity_voronoi(eobs_i, last_locs_i, i, pow, agent_x, agent_y, gx, gy);
+                        get_gravity_voronoi(eobs_i, last_locs_i, i, pow, agent_x, agent_y, gx, gy, last_alive_i);
                     break;
                 }
                 default:
@@ -361,6 +395,9 @@ private:
                           const py::detail::unchecked_reference<float, 2>& actions,
                           int env_idx) {
         for (int i = 0; i < N_AGENTS; ++i) {
+            // Dead agents don't move
+            if (s.agents_alive[i] < 0.5f) continue;
+
             float dy = actions(env_idx, i * 2);
             float dx = actions(env_idx, i * 2 + 1);
 
@@ -463,11 +500,13 @@ private:
             const int viewer_y = static_cast<int>(s.agent_locations[i * 2]);
             const int viewer_x = static_cast<int>(s.agent_locations[i * 2 + 1]);
             float* my_last = s.last_agent_locations + i * (2 * N_AGENTS);
+            float* my_last_alive = s.agents_last_alive + i * N_AGENTS;
 
             for (int j = 0; j < N_AGENTS; ++j) {
                 if (i == j) {
                     my_last[j * 2]     = s.agent_locations[j * 2];
                     my_last[j * 2 + 1] = s.agent_locations[j * 2 + 1];
+                    // own alive status is always known (already set in death roll)
                     continue;
                 }
 
@@ -483,6 +522,7 @@ private:
                 if (updated) {
                     my_last[j * 2]     = s.agent_locations[j * 2];
                     my_last[j * 2 + 1] = s.agent_locations[j * 2 + 1];
+                    my_last_alive[j]   = s.agents_alive[j];
                 }
             }
         }
