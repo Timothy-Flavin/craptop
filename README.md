@@ -145,10 +145,15 @@ env = BatchedGridEnv(
     maps=None,                # str path or list of str paths to ground-truth maps
     expected_maps=None,       # str path or list of str paths to prior belief maps
     global_comms=False,       # If True, use global-communication backend
+    reset_automatically=True, # If False, terminated envs freeze until reset_env(i) is called
 )
 ```
 
 **`global_comms`**: When `True`, switches to the global-communication backend where all agents share a single observation mask and observed danger map, know each other's true positions, and require no `expected_obs` or `last_agent_locations` tracking. The state stride drops from 19,496 to 8,200 floats (~2.4× smaller), improving cache locality and throughput.
+
+**`reset_automatically`**: Controls what happens when an environment terminates (all cells discovered):
+- `True` (default) — the environment resets itself automatically at the start of the next `step()` call. Seamless for standard RL training loops.
+- `False` — terminated environments freeze: `step()` returns the last observed state unchanged, `terminated=True`, and `rewards=0` for that environment until `reset_env(i)` or `reset()` is called manually. Useful when you need to process the terminal state before resetting (e.g., logging episode statistics, applying curriculum changes, or seeding the next episode with a specific map).
 
 **Map arguments** accept:
 - `None` — procedural sine/cosine map is generated per environment
@@ -182,7 +187,24 @@ obs, rewards, terminated, truncated, info = env.step(actions)
 
 In partial-obs mode, `communication_prob` (set in the constructor) is passed to the C++ `step()` to control probabilistic radio position updates between agents. In global-comms mode it is not used.
 
-Environments that terminate are **automatically reset** at the start of their next step.
+By default (`reset_automatically=True`), environments that terminate are **automatically reset** at the start of their next step. When `reset_automatically=False`, terminated environments freeze and must be reset manually with `reset_env(i)`.
+
+##### `reset_env(env_idx)`
+Reset a single environment by index without affecting any others. Returns a zero-copy view of that environment's state row.
+
+```python
+# Manually reset environment 3 and get its new initial state
+obs_row = env.reset_env(3)   # torch.Tensor of shape (stride,)
+
+# Typical pattern with reset_automatically=False:
+env = BatchedGridEnv(num_envs=16, reset_automatically=False)
+obs, _ = env.reset()
+for step in range(10000):
+    obs, rewards, terminated, truncated, info = env.step(actions)
+    for i in terminated.nonzero(squeeze=False).flatten().tolist():
+        log_episode(i, rewards)        # process terminal state first
+        env.reset_env(i)               # then reset that env
+```
 
 ##### `get_gravity_attractions(feature_type, agent_mask=None, pow=2, normalize=False, local=False)`
 Compute gravity attraction vectors for each agent towards cells of a given feature map.
@@ -447,7 +469,7 @@ Agents receive `+1.0` reward (split equally among agents that can see the tile) 
 - Action vectors are L2-normalized before being applied
 - Effective speed per step: `SPEED × (1 - 0.8 × danger)` at the agent's current cell
 - Agent positions are clamped to `[0, 31.99]` on both axes
-- Terminated environments auto-reset at the start of their next `step()` call
+- Terminated environments auto-reset at the start of their next `step()` call (when `reset_automatically=True`, the default). Set `reset_automatically=False` to freeze terminated environments and reset them manually with `reset_env(i)`.
 
 ## Building from Source
 

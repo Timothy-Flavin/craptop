@@ -62,12 +62,14 @@ public:
     std::vector<std::string> expected_map_paths;
     std::vector<bool> env_terminated;
     std::vector<int> undiscovered_remaining;
+    bool reset_automatically;
 
     BatchedEnvironment(int n_envs, int sim_seed,
                        std::vector<std::string> maps = {},
-                       std::vector<std::string> expected_maps = {})
+                       std::vector<std::string> expected_maps = {},
+                       bool auto_reset = true)
         : num_envs(n_envs), seed(sim_seed), map_paths(std::move(maps)),
-          expected_map_paths(std::move(expected_maps))
+          expected_map_paths(std::move(expected_maps)), reset_automatically(auto_reset)
     {
         data.resize(static_cast<size_t>(num_envs) * ENV_STRIDE, 0.0f);
         rngs.resize(num_envs);
@@ -158,6 +160,17 @@ public:
         }
     }
 
+    // Reset a single environment by index.  Thread-safe as long as no
+    // concurrent step() call is operating on the same env_idx.
+    void reset_single(int env_idx) {
+        if (env_idx < 0 || env_idx >= num_envs)
+            throw std::out_of_range("reset_single: env_idx out of range");
+        GameStateView s;
+        bind_state(s, env_idx);
+        reset_env(s, env_idx);
+        env_terminated[env_idx] = false;
+    }
+
     std::pair<py::array_t<float>, py::array_t<bool>> step(
             py::array_t<float> actions_array, float communication_prob = -1.0f) {
         auto r = actions_array.unchecked<2>();
@@ -172,8 +185,16 @@ public:
             bind_state(s, e);
 
             if (env_terminated[e]) {
-                reset_env(s, e);
-                env_terminated[e] = false;
+                if (reset_automatically) {
+                    reset_env(s, e);
+                    env_terminated[e] = false;
+                } else {
+                    // Hold: return zero rewards and keep state frozen
+                    for (int i = 0; i < N_AGENTS; ++i)
+                        rewards_ptr(e, i) = 0.0f;
+                    terminated_ptr(e) = true;
+                    continue;
+                }
             }
 
             update_locations(s, r, e);
@@ -527,12 +548,15 @@ PYBIND11_MODULE(_core, m) {
     REGISTER_FEATURE_TYPE_ENUM(m);
 
     py::class_<BatchedEnvironment>(m, "BatchedEnvironment")
-        .def(py::init<int, int, std::vector<std::string>, std::vector<std::string>>(),
+        .def(py::init<int, int, std::vector<std::string>, std::vector<std::string>, bool>(),
              py::arg("n_envs"),
              py::arg("seed") = 42,
              py::arg("map_paths") = std::vector<std::string>(),
-             py::arg("expected_map_paths") = std::vector<std::string>())
+             py::arg("expected_map_paths") = std::vector<std::string>(),
+             py::arg("reset_automatically") = true)
         .def("reset", &BatchedEnvironment::reset)
+        .def("reset_single", &BatchedEnvironment::reset_single, py::arg("env_idx"))
+        .def_readwrite("reset_automatically", &BatchedEnvironment::reset_automatically)
         .def("step", &BatchedEnvironment::step,
              py::arg("actions"), py::arg("communication_prob") = -1.0f)
         .def("get_memory_view", &BatchedEnvironment::get_memory_view)

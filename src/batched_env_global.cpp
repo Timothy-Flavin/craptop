@@ -21,9 +21,9 @@
 #include "gravity.h"
 
 #ifndef ssize_t
-#  ifdef _WIN32
-     typedef ptrdiff_t ssize_t;
-#  endif
+#ifdef _WIN32
+typedef ptrdiff_t ssize_t;
+#endif
 #endif
 
 namespace py = pybind11;
@@ -61,12 +61,14 @@ public:
     std::vector<std::string> expected_map_paths;
     std::vector<bool> env_terminated;
     std::vector<int> undiscovered_remaining;
+    bool reset_automatically;
 
     BatchedEnvironmentGlobal(int n_envs, int sim_seed,
                              std::vector<std::string> maps = {},
-                             std::vector<std::string> expected_maps = {})
+                             std::vector<std::string> expected_maps = {},
+                             bool auto_reset = true)
         : num_envs(n_envs), seed(sim_seed), map_paths(std::move(maps)),
-          expected_map_paths(std::move(expected_maps))
+          expected_map_paths(std::move(expected_maps)), reset_automatically(auto_reset)
     {
         data.resize(static_cast<size_t>(num_envs) * ENV_STRIDE_GLOBAL, 0.0f);
         rngs.resize(num_envs);
@@ -156,6 +158,18 @@ public:
         }
     }
 
+    // Reset a single environment by index.  Thread-safe as long as no
+    // concurrent step() call is operating on the same env_idx.
+    void reset_single(int env_idx)
+    {
+        if (env_idx < 0 || env_idx >= num_envs)
+            throw std::out_of_range("reset_single: env_idx out of range");
+        GameStateViewGlobal s;
+        bind_state(s, env_idx);
+        reset_env(s, env_idx);
+        env_terminated[env_idx] = false;
+    }
+
     std::pair<py::array_t<float>, py::array_t<bool>> step(
         py::array_t<float> actions_array)
     {
@@ -173,8 +187,19 @@ public:
 
             if (env_terminated[e])
             {
-                reset_env(s, e);
-                env_terminated[e] = false;
+                if (reset_automatically)
+                {
+                    reset_env(s, e);
+                    env_terminated[e] = false;
+                }
+                else
+                {
+                    // Hold: return zero rewards and keep state frozen
+                    for (int i = 0; i < N_AGENTS; ++i)
+                        rewards_ptr(e, i) = 0.0f;
+                    terminated_ptr(e) = true;
+                    continue;
+                }
             }
 
             update_locations(s, r, e);
@@ -196,7 +221,7 @@ public:
     // Python can read and modify state in-place; no data is copied.
     py::array_t<float> get_state()
     {
-        py::capsule base(data.data(), [](void *) {});  // no-op: memory owned by C++
+        py::capsule base(data.data(), [](void *) {}); // no-op: memory owned by C++
         return py::array_t<float>(
             {static_cast<ssize_t>(num_envs), static_cast<ssize_t>(ENV_STRIDE_GLOBAL)},
             {static_cast<ssize_t>(ENV_STRIDE_GLOBAL) * static_cast<ssize_t>(sizeof(float)),
@@ -488,12 +513,15 @@ PYBIND11_MODULE(_core_global, m)
     // FeatureType enum is already registered by _core – do NOT re-register here.
 
     py::class_<BatchedEnvironmentGlobal>(m, "BatchedEnvironment")
-        .def(py::init<int, int, std::vector<std::string>, std::vector<std::string>>(),
+        .def(py::init<int, int, std::vector<std::string>, std::vector<std::string>, bool>(),
              py::arg("n_envs"),
              py::arg("seed") = 42,
              py::arg("map_paths") = std::vector<std::string>(),
-             py::arg("expected_map_paths") = std::vector<std::string>())
+             py::arg("expected_map_paths") = std::vector<std::string>(),
+             py::arg("reset_automatically") = true)
         .def("reset", &BatchedEnvironmentGlobal::reset)
+        .def("reset_single", &BatchedEnvironmentGlobal::reset_single, py::arg("env_idx"))
+        .def_readwrite("reset_automatically", &BatchedEnvironmentGlobal::reset_automatically)
         .def("step", &BatchedEnvironmentGlobal::step,
              py::arg("actions"))
         .def("get_memory_view", &BatchedEnvironmentGlobal::get_memory_view)

@@ -113,13 +113,19 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         communication_prob=-1.0,
         maps=None,
         expected_maps=None,
+        reset_automatically=True,
     ):
         """
         maps: Path or list of paths to ground truth danger maps.
         expected_maps: Path or list of paths to prior belief maps (e.g. satellite data).
+        reset_automatically: If True (default), terminated environments are automatically
+            reset at the start of their next step(). If False, terminated environments
+            hold their last state and continue returning terminated=True and zero rewards
+            until reset_env(i) or reset() is called explicitly.
         """
         self.num_envs = num_envs
         self.communication_prob = communication_prob
+        self.reset_automatically = reset_automatically
         self.n_agents = n_agents
         self.map_size = map_size
         self.device = device
@@ -136,7 +142,7 @@ class BatchedGridEnv(gym.vector.VectorEnv):
 
         # 2. Initialize C++ Backend
         self.env = multi_agent_coverage.BatchedEnvironment(
-            num_envs, seed, processed_maps, processed_expected_maps
+            num_envs, seed, processed_maps, processed_expected_maps, reset_automatically
         )
 
         # 3. Define Spaces
@@ -191,6 +197,20 @@ class BatchedGridEnv(gym.vector.VectorEnv):
             else self.state_tensor.to(self.device)
         )
         return obs, {}
+
+    def reset_env(self, env_idx: int):
+        """Reset a single environment by index without affecting others.
+
+        Args:
+            env_idx: Index of the environment to reset (0 <= env_idx < num_envs).
+
+        Returns:
+            obs: The state tensor row for that environment (shape [stride,]),
+                 as a view into the shared state buffer.
+        """
+        self.env.reset_single(env_idx)
+        obs = self.state_tensor[env_idx]
+        return obs if self.device == "cpu" else obs.to(self.device)
 
     def step(self, actions):
         if isinstance(actions, torch.Tensor):
