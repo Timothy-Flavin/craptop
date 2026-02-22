@@ -181,6 +181,19 @@ public:
         env_terminated[env_idx] = false;
     }
 
+    // Clear termination flags and recompute undiscovered_remaining from
+    // the current obs array.  Call this after injecting belief state from
+    // Python so that step() is no longer a no-op, WITHOUT destroying the
+    // injected recency / obs / danger / locations.
+    void sync_termination()
+    {
+        for (int e = 0; e < num_envs; ++e)
+        {
+            env_terminated[e] = false;
+            undiscovered_remaining[e] = 1e6; // pretend the game is not over no matter what
+        }
+    }
+
     std::pair<py::array_t<float>, py::array_t<bool>> step(
         py::array_t<float> actions_array)
     {
@@ -558,6 +571,7 @@ PYBIND11_MODULE(_core_global, m)
              py::arg("death_penalty") = -20.0f)
         .def("reset", &BatchedEnvironmentGlobal::reset)
         .def("reset_single", &BatchedEnvironmentGlobal::reset_single, py::arg("env_idx"))
+        .def("sync_termination", &BatchedEnvironmentGlobal::sync_termination)
         .def_readwrite("reset_automatically", &BatchedEnvironmentGlobal::reset_automatically)
         .def_readwrite("death_penalty", &BatchedEnvironmentGlobal::death_penalty)
         .def("step", &BatchedEnvironmentGlobal::step,

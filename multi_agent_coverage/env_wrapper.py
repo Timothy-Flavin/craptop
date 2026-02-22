@@ -262,6 +262,16 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         obs = self.state_tensor[env_idx]
         return obs if self.device == "cpu" else obs.to(self.device)
 
+    def sync_termination(self):
+        """Clear env_terminated flags and recompute undiscovered_remaining
+        from the current obs array.  Use after injecting belief state into
+        a global-comms imaginary env so that step() is no longer a no-op,
+        without destroying the injected recency / obs / danger / locations.
+
+        Only available on global_comms backends.
+        """
+        self.env.sync_termination()
+
     def step(self, actions):
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().numpy()
