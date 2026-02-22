@@ -115,6 +115,7 @@ class BatchedGridEnv(gym.vector.VectorEnv):
         expected_maps=None,
         reset_automatically=True,
         death_penalty=-20.0,
+        share_danger=False,
     ):
         """
         maps: Path or list of paths to ground truth danger maps.
@@ -125,11 +126,15 @@ class BatchedGridEnv(gym.vector.VectorEnv):
             until reset_env(i) or reset() is called explicitly.
         death_penalty: Reward applied to an agent the step it dies (default -20.0).
             Set to 0.0 to disable the penalty while keeping the death mechanic.
+        share_danger: If True, when a radio communication fires between agents i and j,
+            agent i also receives agent j's currently-observed danger map for j's view
+            window (7×7 tiles around j). Has no effect when communication_prob <= 0.
         """
         self.num_envs = num_envs
         self.communication_prob = communication_prob
         self.reset_automatically = reset_automatically
         self.death_penalty = death_penalty
+        self.share_danger = share_danger
         self.n_agents = n_agents
         self.map_size = map_size
         self.device = device
@@ -236,7 +241,9 @@ class BatchedGridEnv(gym.vector.VectorEnv):
             actions = actions.detach().cpu().numpy()
 
         flat_actions = actions.reshape(self.num_envs, -1).astype(np.float32)
-        rewards, terminated_np = self.env.step(flat_actions, self.communication_prob)
+        rewards, terminated_np = self.env.step(
+            flat_actions, self.communication_prob, self.share_danger
+        )
 
         obs = self.state_tensor
         rewards = torch.from_numpy(rewards)

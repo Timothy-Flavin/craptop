@@ -29,7 +29,7 @@ ext_modules = [
 
 setuptools.setup(
     name="multi_agent_coverage",
-    version="0.2.4",
+    version="0.2.6",
     author="Your Name",
     description="High-performance batched multi-agent environment",
     packages=["multi_agent_coverage"],

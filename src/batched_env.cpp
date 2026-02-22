@@ -216,7 +216,8 @@ public:
     }
 
     std::pair<py::array_t<float>, py::array_t<bool>> step(
-        py::array_t<float> actions_array, float communication_prob = -1.0f)
+        py::array_t<float> actions_array, float communication_prob = -1.0f,
+        bool share_danger = false)
     {
         auto r = actions_array.unchecked<2>();
         py::array_t<float> rewards_array({num_envs, N_AGENTS});
@@ -275,7 +276,7 @@ public:
 
             update_obs(s);
             update_recency(s);
-            update_last_location(s, e, communication_prob);
+            update_last_location(s, e, communication_prob, share_danger);
             update_expected_obs(s);
             bool done = calc_rewards(s, rewards_ptr, e);
             terminated_ptr(e) = done;
@@ -565,7 +566,7 @@ private:
         }
     }
 
-    void update_last_location(GameStateView &s, int env_idx, float p)
+    void update_last_location(GameStateView &s, int env_idx, float p, bool share_danger)
     {
         const bool try_radio = (p > 0.0f && p <= 1.0f);
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
@@ -590,17 +591,38 @@ private:
                 const int target_y = static_cast<int>(s.agent_locations[j * 2]);
                 const int target_x = static_cast<int>(s.agent_locations[j * 2 + 1]);
 
-                bool updated = (std::abs(viewer_y - target_y) <= VIEW_RANGE &&
-                                std::abs(viewer_x - target_x) <= VIEW_RANGE);
+                bool los = (std::abs(viewer_y - target_y) <= VIEW_RANGE &&
+                            std::abs(viewer_x - target_x) <= VIEW_RANGE);
+                bool via_radio = false;
 
-                if (!updated && try_radio && dist(rngs[env_idx]) < p)
-                    updated = true;
+                if (!los && try_radio && dist(rngs[env_idx]) < p)
+                    via_radio = true;
 
-                if (updated)
+                if (los || via_radio)
                 {
                     my_last[j * 2] = s.agent_locations[j * 2];
                     my_last[j * 2 + 1] = s.agent_locations[j * 2 + 1];
                     my_last_alive[j] = s.agents_alive[j];
+
+                    // Radio danger sharing: copy j's current-view observed_danger into i's map.
+                    // Only on radio (LOS already covered by update_obs for i's own view).
+                    if (via_radio && share_danger)
+                    {
+                        const int jy = target_y;
+                        const int jx = target_x;
+                        const int y_s = std::max(0, jy - VIEW_RANGE);
+                        const int y_e = std::min(MAP_SIZE, jy + VIEW_RANGE + 1);
+                        const int x_s = std::max(0, jx - VIEW_RANGE);
+                        const int x_e = std::min(MAP_SIZE, jx + VIEW_RANGE + 1);
+                        const float *od_j = s.observed_danger + j * FLAT_MAP_SIZE;
+                        float *od_i = s.observed_danger + i * FLAT_MAP_SIZE;
+                        for (int ly = y_s; ly < y_e; ++ly)
+                        {
+                            const int row_off = ly * MAP_SIZE;
+                            for (int lx = x_s; lx < x_e; ++lx)
+                                od_i[row_off + lx] = od_j[row_off + lx];
+                        }
+                    }
                 }
             }
         }
@@ -691,7 +713,8 @@ PYBIND11_MODULE(_core, m)
         .def_readwrite("reset_automatically", &BatchedEnvironment::reset_automatically)
         .def_readwrite("death_penalty", &BatchedEnvironment::death_penalty)
         .def("step", &BatchedEnvironment::step,
-             py::arg("actions"), py::arg("communication_prob") = -1.0f)
+             py::arg("actions"), py::arg("communication_prob") = -1.0f,
+             py::arg("share_danger") = false)
         .def("get_memory_view", &BatchedEnvironment::get_memory_view)
         .def("get_state", &BatchedEnvironment::get_state)
         .def("get_stride", &BatchedEnvironment::get_stride)
